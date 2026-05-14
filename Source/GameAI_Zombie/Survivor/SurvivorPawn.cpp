@@ -6,6 +6,11 @@
 #include "Common/HealthComponent.h"
 #include "Common/InventoryComponent.h"
 #include "Common/StaminaComponent.h"
+#include "Items/BaseItem.h"
+#include "Zombies/BaseZombie.h"
+#include "AIController.h"
+#include "BehaviorTree/BlackboardComponent.h"
+#include "SurvivorAIController.h"
 
 ASurvivorPawn::ASurvivorPawn()
 {
@@ -56,7 +61,72 @@ void ASurvivorPawn::BeginPlay()
 
 void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
-	// To implement for students
+	if (!Actor) return;
+
+	// Get our blackboard through the AI controller
+	ASurvivorAIController* AIC = Cast<ASurvivorAIController>(GetController());
+	if (!AIC) return;
+
+	UBlackboardComponent* BB = AIC->GetBB();
+	if (!BB) return;
+
+	const bool bSensed = Stimulus.WasSuccessfullySensed();
+
+	// --- ZOMBIE perceived ---
+	if (ABaseZombie* Zombie = Cast<ABaseZombie>(Actor))
+	{
+		if (bSensed)
+		{
+			// We see (or got damaged by) a zombie — track it
+			BB->SetValueAsObject(FName("TargetEnemy"), Zombie);
+			BB->SetValueAsVector(FName("LastKnownEnemyLocation"), Zombie->GetActorLocation());
+
+			UE_LOG(LogTemp, Log, TEXT("Perception: Zombie SENSED at %s"), *Zombie->GetActorLocation().ToString());
+		}
+		else
+		{
+			// Lost sight of zombie — clear the actor ref but keep last known location for investigation
+			AActor* CurrentTarget = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
+			if (CurrentTarget == Zombie)
+			{
+				BB->ClearValue(FName("TargetEnemy"));
+				// LastKnownEnemyLocation intentionally kept so we can investigate
+			}
+
+			UE_LOG(LogTemp, Log, TEXT("Perception: Zombie LOST"));
+		}
+		return;
+	}
+
+	// --- ITEM perceived ---
+	if (ABaseItem* Item = Cast<ABaseItem>(Actor))
+	{
+		if (bSensed)
+		{
+			// Skip garbage items
+			if (Item->GetItemType() == EItemType::Garbage) return;
+
+			// If we don't have a target item yet, take this one
+			// (priority logic will be refined in the BTService later)
+			AActor* CurrentItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
+			if (!CurrentItem)
+			{
+				BB->SetValueAsObject(FName("TargetItem"), Item);
+				UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d"), static_cast<int>(Item->GetItemType()));
+			}
+		}
+		else
+		{
+			// Lost sight of item — clear if it was our target
+			AActor* CurrentItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
+			if (CurrentItem == Item)
+			{
+				BB->ClearValue(FName("TargetItem"));
+				UE_LOG(LogTemp, Log, TEXT("Perception: Item LOST"));
+			}
+		}
+		return;
+	}
 }
 
 void ASurvivorPawn::Tick(float DeltaTime)

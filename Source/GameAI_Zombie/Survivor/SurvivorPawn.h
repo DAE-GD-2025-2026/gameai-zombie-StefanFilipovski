@@ -57,11 +57,17 @@ protected:
 	
 public:
 	virtual void Tick(float DeltaTime) override;
-	
+
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
-	
+
 	void StartRunning();
 	void StopRunning();
-	
+
 	bool IsRunning() const;
+
+	// Public getters so BT tasks/services can access components
+	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
+	UStaminaComponent* GetStaminaComponent() const { return StaminaComponent; }
+	UInventoryComponent* GetInventoryComponent() const { return InventoryComponent; }
+	UFloatingPawnMovement* GetMovementComponent() const { return FloatingPawnMovement; }
 };

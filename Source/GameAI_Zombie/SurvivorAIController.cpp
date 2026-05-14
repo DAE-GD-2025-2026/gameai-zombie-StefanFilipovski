@@ -1,27 +1,42 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
-
-
-#include "SurvivorAIController.h"
+﻿#include "SurvivorAIController.h"
 #include "Components/GameFrameworkComponentManager.h"
+#include "BehaviorTree/BehaviorTreeComponent.h"
 
-// Sets default values
 ASurvivorAIController::ASurvivorAIController()
 {
-	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
-	PrimaryActorTick.bCanEverTick = true;
+	// No need to tick the controller itself — the BT handles everything
+	PrimaryActorTick.bCanEverTick = false;
 }
 
-// Called when the game starts or when spawned
 void ASurvivorAIController::BeginPlay()
 {
 	Super::BeginPlay();
-	UGameFrameworkComponentManager* ComponentManager = GetGameInstance()->GetSubsystem<UGameFrameworkComponentManager>();
-	ComponentManager->AddReceiver(this);
+
+	// Register with the component manager (required by the exam framework)
+	if (UGameFrameworkComponentManager* ComponentManager =
+		GetGameInstance()->GetSubsystem<UGameFrameworkComponentManager>())
+	{
+		ComponentManager->AddReceiver(this);
+	}
+
+	// Start the Behavior Tree
+	if (BehaviorTreeAsset)
+	{
+		// UseBlackboard creates (or reuses) a BB component from the BT's linked BB asset
+		UBlackboardComponent* BB = nullptr;
+		UseBlackboard(BehaviorTreeAsset->BlackboardAsset, BB);
+		RunBehaviorTree(BehaviorTreeAsset);
+
+		UE_LOG(LogTemp, Log, TEXT("SurvivorAI: Behavior Tree started successfully."));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SurvivorAI: No BehaviorTreeAsset assigned!"));
+	}
 }
 
-// Called every frame
-void ASurvivorAIController::Tick(float DeltaTime)
+UBlackboardComponent* ASurvivorAIController::GetBB() const
 {
-	Super::Tick(DeltaTime);
+	return Blackboard;
 }
 
