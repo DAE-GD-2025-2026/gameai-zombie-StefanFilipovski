@@ -106,24 +106,15 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 			// Skip garbage items
 			if (Item->GetItemType() == EItemType::Garbage) return;
 
-			// If we don't have a target item yet, take this one
-			// (priority logic will be refined in the BTService later)
-			AActor* CurrentItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
-			if (!CurrentItem)
-			{
-				BB->SetValueAsObject(FName("TargetItem"), Item);
-				UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d"), static_cast<int>(Item->GetItemType()));
-			}
+			// Always update to the newest seen item (or set if none)
+			BB->SetValueAsObject(FName("TargetItem"), Item);
+			UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d"), static_cast<int>(Item->GetItemType()));
 		}
 		else
 		{
-			// Lost sight of item — clear if it was our target
-			AActor* CurrentItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
-			if (CurrentItem == Item)
-			{
-				BB->ClearValue(FName("TargetItem"));
-				UE_LOG(LogTemp, Log, TEXT("Perception: Item LOST"));
-			}
+			// DON'T clear TargetItem on lost sight — keep it so we can walk to it.
+			// The Pickup task will clear it after grabbing, or if the item is destroyed/invalid.
+			UE_LOG(LogTemp, Log, TEXT("Perception: Item left sight (keeping target)"));
 		}
 		return;
 	}

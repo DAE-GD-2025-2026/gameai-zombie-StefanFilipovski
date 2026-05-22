@@ -3,6 +3,7 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Survivor/SurvivorPawn.h"
 #include "Common/HealthComponent.h"
+#include "Common/StaminaComponent.h"
 #include "Common/InventoryComponent.h"
 #include "Items/BaseItem.h"
 #include "Items/ItemType.h"
@@ -54,11 +55,35 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 	}
 	BB->SetValueAsBool(FName("bHasWeapon"), bHasWeapon);
 
-	// --- Flee decision ---
+	// --- Consumable needs ---
 	const float HealthPct = BB->GetValueAsFloat(FName("HealthPercent"));
+	bool bHasMedkit = false;
+	bool bHasFood = false;
+	if (Inventory)
+	{
+		for (ABaseItem* Item : Inventory->GetInventory())
+		{
+			if (Item && Item->GetValue() > 0)
+			{
+				if (Item->GetItemType() == EItemType::Medkit) bHasMedkit = true;
+				if (Item->GetItemType() == EItemType::Food) bHasFood = true;
+			}
+		}
+	}
+	// Need heal: HP < 70% and we have a medkit
+	BB->SetValueAsBool(FName("bNeedsHeal"), HealthPct < 0.7f && bHasMedkit);
+
+	// Need food: stamina < 40% and we have food
+	UStaminaComponent* Stamina = Survivor->GetStaminaComponent();
+	const float StaminaPct = (Stamina && Stamina->GetMaxStamina() > 0)
+		? Stamina->GetCurrentStamina() / Stamina->GetMaxStamina()
+		: 1.f;
+	BB->SetValueAsBool(FName("bNeedsFood"), StaminaPct < 0.4f && bHasFood);
+
+	// --- Flee decision ---
 	const bool bEnemyVisible = BB->GetValueAsObject(FName("TargetEnemy")) != nullptr;
 	// Flee if health is critical and we have no weapon, or if health is very low regardless
-	const bool bShouldFlee = bEnemyVisible && (HealthPct < 0.3f && !bHasWeapon);
+	const bool bShouldFlee = bEnemyVisible && ((HealthPct < 0.3f && !bHasWeapon) || HealthPct < 0.15f);
 	BB->SetValueAsBool(FName("bShouldFlee"), bShouldFlee);
 
 	// --- Self location ---
