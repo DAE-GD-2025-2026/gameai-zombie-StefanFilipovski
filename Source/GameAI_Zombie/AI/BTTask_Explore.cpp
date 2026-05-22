@@ -4,6 +4,9 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "NavigationSystem.h"
 #include "Survivor/SurvivorPawn.h"
+#include "Village/House/House.h"
+#include "PurgeZones/PurgeZone.h"
+#include "Kismet/GameplayStatics.h"
 
 UBTTask_Explore::UBTTask_Explore()
 {
@@ -31,24 +34,110 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 	const FVector Origin = Pawn->GetActorLocation();
 	FVector Target = Origin;
 
-	// Try navmesh first
-	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
-	if (NavSys)
+	// --- Avoid purge zones: check if any purge zone is near us ---
+	TArray<AActor*> PurgeZones;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APurgeZone::StaticClass(), PurgeZones);
+
+	FVector PurgeAvoidance = FVector::ZeroVector;
+	for (AActor* PZ : PurgeZones)
 	{
-		FNavLocation RandomPoint;
-		if (NavSys->GetRandomReachablePointInRadius(Origin, ExploreRadius, RandomPoint))
+		if (!PZ) continue;
+		const float DistToPurge = FVector::Dist(Origin, PZ->GetActorLocation());
+		if (DistToPurge < 1500.f) // purge zone is dangerously close
 		{
-			Target = RandomPoint.Location;
+			// Add repulsion force away from purge zone
+			FVector AwayDir = (Origin - PZ->GetActorLocation()).GetSafeNormal2D();
+			PurgeAvoidance += AwayDir * (1500.f - DistToPurge);
 		}
-		else
+	}
+
+	if (!PurgeAvoidance.IsNearlyZero())
+	{
+		// Purge zone nearby — flee from it instead of exploring houses
+		PurgeAvoidance.Normalize();
+		Target = Origin + PurgeAvoidance * 1200.f;
+
+		if (Survivor) Survivor->StartRunning(); // sprint away from purge
+
+		UE_LOG(LogTemp, Log, TEXT("Explore: FLEEING from purge zone!"));
+
+		const EPathFollowingRequestResult::Type Result = AIC->MoveToLocation(Target, 50.f);
+		if (Result == EPathFollowingRequestResult::Failed)
 		{
-			// Navmesh query failed — use random offset
-			Target = Origin + FVector(FMath::RandRange(-ExploreRadius, ExploreRadius),
-			                          FMath::RandRange(-ExploreRadius, ExploreRadius), 0.f);
+			return EBTNodeResult::Succeeded;
 		}
+		return EBTNodeResult::InProgress;
+	}
+
+	// --- Find houses to explore, avoiding recently visited ones ---
+	TArray<AActor*> AllHouses;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AHouse::StaticClass(), AllHouses);
+
+	// Clean up stale visited entries
+	VisitedHouses.RemoveAll([](const TWeakObjectPtr<AActor>& Ptr) { return !Ptr.IsValid(); });
+
+	// Build list of unvisited houses
+	TArray<AHouse*> UnvisitedHouses;
+	for (AActor* Actor : AllHouses)
+	{
+		AHouse* House = Cast<AHouse>(Actor);
+		if (!House) continue;
+
+		bool bVisited = false;
+		for (const TWeakObjectPtr<AActor>& Visited : VisitedHouses)
+		{
+			if (Visited.Get() == House)
+			{
+				bVisited = true;
+				break;
+			}
+		}
+		if (!bVisited)
+		{
+			UnvisitedHouses.Add(House);
+		}
+	}
+
+	// If all visited, clear the list and start fresh
+	if (UnvisitedHouses.Num() == 0)
+	{
+		VisitedHouses.Empty();
+		for (AActor* Actor : AllHouses)
+		{
+			if (AHouse* House = Cast<AHouse>(Actor))
+			{
+				UnvisitedHouses.Add(House);
+			}
+		}
+	}
+
+	// Pick the nearest unvisited house
+	AHouse* BestHouse = nullptr;
+	float BestDist = MAX_FLT;
+	for (AHouse* House : UnvisitedHouses)
+	{
+		const float Dist = FVector::Dist(Origin, House->GetActorLocation());
+		if (Dist < BestDist)
+		{
+			BestDist = Dist;
+			BestHouse = House;
+		}
+	}
+
+	if (BestHouse)
+	{
+		FHouseBounds Bounds = BestHouse->GetBounds();
+		Target = Bounds.Origin;
+
+		// Mark as visited
+		VisitedHouses.Add(BestHouse);
+
+		UE_LOG(LogTemp, Log, TEXT("Explore: Heading toward house at %s (dist %.0f, %d unvisited left)"),
+			*Target.ToString(), BestDist, UnvisitedHouses.Num() - 1);
 	}
 	else
 	{
+		// No houses at all — random wander
 		Target = Origin + FVector(FMath::RandRange(-ExploreRadius, ExploreRadius),
 		                          FMath::RandRange(-ExploreRadius, ExploreRadius), 0.f);
 	}
@@ -56,8 +145,7 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 	const EPathFollowingRequestResult::Type Result = AIC->MoveToLocation(Target, 50.f);
 	if (Result == EPathFollowingRequestResult::Failed)
 	{
-		// Movement request failed immediately — don't get stuck
-		return EBTNodeResult::Succeeded; // succeed so we try another explore next tick
+		return EBTNodeResult::Succeeded;
 	}
 
 	return EBTNodeResult::InProgress;
@@ -75,7 +163,6 @@ void UBTTask_Explore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMem
 		return;
 	}
 
-	// Timeout — don't get stuck
 	if (Memory->TimeElapsed >= TimeoutSeconds)
 	{
 		AIC->StopMovement();

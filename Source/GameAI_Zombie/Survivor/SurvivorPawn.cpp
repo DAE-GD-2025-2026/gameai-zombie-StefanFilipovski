@@ -36,7 +36,7 @@ ASurvivorPawn::ASurvivorPawn()
 	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
 	SightConfig->SightRadius = 1000.0f;
 	SightConfig->LoseSightRadius = 1500.0f;
-	SightConfig->PeripheralVisionAngleDegrees = 70.0f;
+	SightConfig->PeripheralVisionAngleDegrees = 120.0f; // Wide FOV to spot items in rooms
 	SightConfig->DetectionByAffiliation.bDetectEnemies = true;
 	SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
 
@@ -87,15 +87,16 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 		}
 		else
 		{
-			// Lost sight of zombie — clear the actor ref but keep last known location for investigation
+			// Lost sight of zombie — update last known location but DON'T clear TargetEnemy.
+			// The BT service will clear it after a timeout if we truly can't see it anymore.
+			// This prevents flickering at the perception boundary.
 			AActor* CurrentTarget = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
 			if (CurrentTarget == Zombie)
 			{
-				BB->ClearValue(FName("TargetEnemy"));
-				// LastKnownEnemyLocation intentionally kept so we can investigate
+				BB->SetValueAsVector(FName("LastKnownEnemyLocation"), Zombie->GetActorLocation());
 			}
 
-			UE_LOG(LogTemp, Log, TEXT("Perception: Zombie LOST"));
+			// Zombie left sight — keeping target, no log to reduce spam
 		}
 		return;
 	}
@@ -108,16 +109,30 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 			// Skip garbage items
 			if (Item->GetItemType() == EItemType::Garbage) return;
 
-			// Always update to the newest seen item (or set if none)
-			BB->SetValueAsObject(FName("TargetItem"), Item);
-			UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d"), static_cast<int>(Item->GetItemType()));
+			// Only update TargetItem if:
+			// 1. We don't have one, OR
+			// 2. This item is closer than the current target
+			ABaseItem* CurrentTarget = Cast<ABaseItem>(BB->GetValueAsObject(FName("TargetItem")));
+			if (!CurrentTarget || !IsValid(CurrentTarget))
+			{
+				BB->SetValueAsObject(FName("TargetItem"), Item);
+				UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d (new target)"),
+					static_cast<int>(Item->GetItemType()));
+			}
+			else
+			{
+				const float DistToNew = FVector::Dist(GetActorLocation(), Item->GetActorLocation());
+				const float DistToCurrent = FVector::Dist(GetActorLocation(), CurrentTarget->GetActorLocation());
+				if (DistToNew < DistToCurrent)
+				{
+					BB->SetValueAsObject(FName("TargetItem"), Item);
+					UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d (closer, switching target)"),
+						static_cast<int>(Item->GetItemType()));
+				}
+			}
 		}
-		else
-		{
-			// DON'T clear TargetItem on lost sight — keep it so we can walk to it.
-			// The Pickup task will clear it after grabbing, or if the item is destroyed/invalid.
-			UE_LOG(LogTemp, Log, TEXT("Perception: Item left sight (keeping target)"));
-		}
+		// On lost sight: don't clear, keep target so we can walk to it.
+		// No log here to reduce spam.
 		return;
 	}
 }
