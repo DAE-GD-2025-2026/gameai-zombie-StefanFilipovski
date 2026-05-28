@@ -43,6 +43,7 @@ EBTNodeResult::Type UBTTask_UseConsumable::ExecuteTask(UBehaviorTreeComponent& O
 			if (Items[i] && Items[i]->GetItemType() == EItemType::Medkit && Items[i]->GetValue() > 0)
 			{
 				Inventory->UseItem(i);
+				Inventory->RemoveItem(i); // Free the slot so inventory isn't permanently full
 				UE_LOG(LogTemp, Log, TEXT("UseConsumable: Used Medkit from slot %d (HP %.0f%%)"), i, HealthPct * 100.f);
 				return EBTNodeResult::Succeeded;
 			}
@@ -57,6 +58,7 @@ EBTNodeResult::Type UBTTask_UseConsumable::ExecuteTask(UBehaviorTreeComponent& O
 			if (Items[i] && Items[i]->GetItemType() == EItemType::Food && Items[i]->GetValue() > 0)
 			{
 				Inventory->UseItem(i);
+				Inventory->RemoveItem(i); // Free the slot so inventory isn't permanently full
 				UE_LOG(LogTemp, Log, TEXT("UseConsumable: Used Food from slot %d (Stamina %.0f%%)"), i, StaminaPct * 100.f);
 				return EBTNodeResult::Succeeded;
 			}

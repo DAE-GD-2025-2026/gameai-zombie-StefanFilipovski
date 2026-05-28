@@ -109,6 +109,23 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 			// Skip garbage items
 			if (Item->GetItemType() == EItemType::Garbage) return;
 
+			// Skip if inventory is full — no point chasing items we can't carry
+			UInventoryComponent* Inv = GetInventoryComponent();
+			if (Inv)
+			{
+				bool bHasEmptySlot = false;
+				for (ABaseItem* Slot : Inv->GetInventory())
+				{
+					if (Slot == nullptr) { bHasEmptySlot = true; break; }
+				}
+				if (!bHasEmptySlot)
+				{
+					UE_LOG(LogTemp, Verbose, TEXT("Perception: Inventory FULL, ignoring item type %d"),
+						static_cast<int>(Item->GetItemType()));
+					return; // inventory full, ignore items
+				}
+			}
+
 			// Only update TargetItem if:
 			// 1. We don't have one, OR
 			// 2. This item is closer than the current target
@@ -131,8 +148,6 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 				}
 			}
 		}
-		// On lost sight: don't clear, keep target so we can walk to it.
-		// No log here to reduce spam.
 		return;
 	}
 }
@@ -149,6 +164,11 @@ void ASurvivorPawn::SetupPlayerInputComponent(class UInputComponent* PlayerInput
 
 void ASurvivorPawn::StartRunning()
 {
+	// Don't start running if we have no stamina — prevents toggle spam
+	if (StaminaComponent && StaminaComponent->GetCurrentStamina() <= 0.f)
+	{
+		return;
+	}
 	bIsRunning = true;
 	FloatingPawnMovement->MaxSpeed = RunningSpeed;
 }

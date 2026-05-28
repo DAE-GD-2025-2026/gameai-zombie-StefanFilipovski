@@ -45,18 +45,18 @@ EBTNodeResult::Type UBTTask_FleeFromEnemy::ExecuteTask(UBehaviorTreeComponent& O
 		}
 	}
 
-	// Also flee from nearby purge zones
+	// Also nudge away from very close purge zones, but don't let them dominate flee direction.
+	// Enemy avoidance is the priority — purge zones are small and have a delay before detonation.
 	TArray<AActor*> PurgeZones;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APurgeZone::StaticClass(), PurgeZones);
 	for (AActor* PZ : PurgeZones)
 	{
 		if (!PZ) continue;
 		const float DistToPurge = FVector::Dist(MyLocation, PZ->GetActorLocation());
-		if (DistToPurge < 1500.f)
+		if (DistToPurge < 300.f) // Only react when really close to the blast
 		{
-			// Stronger repulsion the closer we are
 			FVector AwayDir = (MyLocation - PZ->GetActorLocation()).GetSafeNormal2D();
-			FleeDirection += AwayDir * (1500.f / FMath::Max(DistToPurge, 100.f));
+			FleeDirection += AwayDir * 0.3f; // Light nudge, don't override enemy flee direction
 		}
 	}
 
@@ -138,6 +138,48 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 	}
 
 	ASurvivorPawn* Survivor = Cast<ASurvivorPawn>(AIC->GetPawn());
+
+	// --- Stuck detection: if barely moved in 1.5s while fleeing, abort to re-pick direction ---
+	if (Survivor)
+	{
+		const FVector CurrentPos = Survivor->GetActorLocation();
+		if (!Memory->bInitialized)
+		{
+			Memory->LastCheckedLocation = CurrentPos;
+			Memory->StuckCheckTimer = 0.f;
+			Memory->bInitialized = true;
+		}
+		else
+		{
+			Memory->StuckCheckTimer += DeltaSeconds;
+			if (Memory->StuckCheckTimer >= 1.5f)
+			{
+				const float DistMoved = FVector::Dist2D(CurrentPos, Memory->LastCheckedLocation);
+				if (DistMoved < 60.f) // Stuck against a wall while fleeing
+				{
+					AIC->StopMovement();
+
+					// Short random escape move to push through walls/doorways
+					const float RandomAngle = FMath::RandRange(0.f, 360.f);
+					const float RandomDist = FMath::RandRange(200.f, 400.f);
+					FVector EscapeDir = FVector(FMath::Cos(FMath::DegreesToRadians(RandomAngle)),
+					                            FMath::Sin(FMath::DegreesToRadians(RandomAngle)), 0.f);
+					FVector EscapeTarget = CurrentPos + EscapeDir * RandomDist;
+
+					UE_LOG(LogTemp, Log, TEXT("Flee: STUCK (moved %.0f in 1.5s), short escape move toward %.0f deg"),
+						DistMoved, RandomAngle);
+
+					AIC->MoveToLocation(EscapeTarget, 30.f);
+					// Keep running during escape
+					Memory->LastCheckedLocation = CurrentPos;
+					Memory->StuckCheckTimer = 0.f;
+					return;
+				}
+				Memory->LastCheckedLocation = CurrentPos;
+				Memory->StuckCheckTimer = 0.f;
+			}
+		}
+	}
 
 	// Timeout
 	if (Memory->TimeElapsed >= TimeoutSeconds)

@@ -82,23 +82,11 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		: 1.f;
 	BB->SetValueAsBool(FName("bNeedsFood"), StaminaPct < 0.4f && bHasFood);
 
-	// --- Purge zone danger ---
-	bool bPurgeNearby = false;
-	TArray<AActor*> PurgeZones;
-	UGameplayStatics::GetAllActorsOfClass(Survivor->GetWorld(), APurgeZone::StaticClass(), PurgeZones);
-	for (AActor* PZ : PurgeZones)
-	{
-		if (PZ && FVector::Dist(Survivor->GetActorLocation(), PZ->GetActorLocation()) < 1500.f)
-		{
-			bPurgeNearby = true;
-			break;
-		}
-	}
-
 	// --- Flee decision ---
+	// Only flee from enemies when we're in real danger — no weapon + low HP, or critically low HP.
+	// Purge zones are handled by sidestepping in the Explore/Flee tasks, NOT by triggering bShouldFlee.
 	const bool bEnemyVisible = BB->GetValueAsObject(FName("TargetEnemy")) != nullptr;
-	// Flee if: purge zone nearby, or (enemy visible and low HP without weapon), or critically low HP
-	const bool bShouldFlee = bPurgeNearby || (bEnemyVisible && ((HealthPct < 0.3f && !bHasWeapon) || HealthPct < 0.15f));
+	const bool bShouldFlee = bEnemyVisible && ((HealthPct < 0.3f && !bHasWeapon) || HealthPct < 0.15f);
 	BB->SetValueAsBool(FName("bShouldFlee"), bShouldFlee);
 
 	// --- Validate TargetEnemy (clear if dead, destroyed, or too far) ---
@@ -121,11 +109,58 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// --- Validate TargetItem (clear if destroyed or picked up) ---
+	// --- Validate TargetItem (clear if destroyed, picked up, or inventory full) ---
 	AActor* TargetItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
-	if (TargetItem && !IsValid(TargetItem))
+	bool bHasEmptySlot = false;
+	if (Inventory)
 	{
-		BB->ClearValue(FName("TargetItem"));
+		for (ABaseItem* Slot : Inventory->GetInventory())
+		{
+			if (Slot == nullptr) { bHasEmptySlot = true; break; }
+		}
+	}
+
+	if (TargetItem)
+	{
+		if (!IsValid(TargetItem))
+		{
+			BB->ClearValue(FName("TargetItem"));
+			TargetItem = nullptr;
+		}
+		else if (!bHasEmptySlot)
+		{
+			BB->ClearValue(FName("TargetItem"));
+			TargetItem = nullptr;
+		}
+	}
+
+	// If we have no target item but have inventory space, re-scan perception for visible items.
+	// OnPerceptionUpdated only fires on state changes — items already in sight won't re-trigger.
+	if (!TargetItem && bHasEmptySlot && Survivor->GetPerceptionComponent())
+	{
+		TArray<AActor*> PerceivedActors;
+		Survivor->GetPerceptionComponent()->GetCurrentlyPerceivedActors(nullptr, PerceivedActors);
+
+		ABaseItem* ClosestItem = nullptr;
+		float ClosestDist = MAX_FLT;
+		for (AActor* Actor : PerceivedActors)
+		{
+			ABaseItem* Item = Cast<ABaseItem>(Actor);
+			if (!Item || !IsValid(Item)) continue;
+			if (Item->GetItemType() == EItemType::Garbage) continue;
+
+			const float Dist = FVector::Dist(Survivor->GetActorLocation(), Item->GetActorLocation());
+			if (Dist < ClosestDist)
+			{
+				ClosestDist = Dist;
+				ClosestItem = Item;
+			}
+		}
+
+		if (ClosestItem)
+		{
+			BB->SetValueAsObject(FName("TargetItem"), ClosestItem);
+		}
 	}
 
 	// --- Self location ---

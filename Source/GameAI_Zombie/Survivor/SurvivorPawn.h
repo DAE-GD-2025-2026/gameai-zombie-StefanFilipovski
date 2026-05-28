@@ -71,4 +71,5 @@ public:
 	UStaminaComponent* GetStaminaComponent() const { return StaminaComponent; }
 	UInventoryComponent* GetInventoryComponent() const { return InventoryComponent; }
 	UFloatingPawnMovement* GetMovementComponent() const { return FloatingPawnMovement; }
+	UAIPerceptionComponent* GetPerceptionComponent() const { return PerceptionComp; }
 };

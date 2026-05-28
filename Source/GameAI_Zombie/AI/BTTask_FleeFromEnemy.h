@@ -7,6 +7,9 @@
 struct FBTFleeMemory
 {
 	float TimeElapsed = 0.f;
+	float StuckCheckTimer = 0.f;
+	FVector LastCheckedLocation = FVector::ZeroVector;
+	bool bInitialized = false;
 };
 
 /**

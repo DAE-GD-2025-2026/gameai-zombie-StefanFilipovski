@@ -86,7 +86,16 @@ void UBTTask_FightEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 					if (Item->GetValue() > 0)
 					{
 						Inventory->UseItem(i);
-						UE_LOG(LogTemp, Log, TEXT("Fight: Fired weapon in slot %d"), i);
+						const int32 AmmoLeft = Item->GetValue();
+						UE_LOG(LogTemp, Log, TEXT("Fight: Fired weapon in slot %d (%d ammo left)"), i, AmmoLeft);
+
+						// Discard empty weapon to free inventory slot
+						if (AmmoLeft <= 0)
+						{
+							Inventory->RemoveItem(i);
+							UE_LOG(LogTemp, Log, TEXT("Fight: Weapon in slot %d is empty, discarded"), i);
+						}
+
 						FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 						return;
 					}

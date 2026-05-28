@@ -5,6 +5,7 @@
 #include "Survivor/SurvivorPawn.h"
 #include "Common/InventoryComponent.h"
 #include "Items/BaseItem.h"
+#include "Kismet/GameplayStatics.h"
 
 UBTTask_PickupItem::UBTTask_PickupItem()
 {
@@ -110,6 +111,7 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 	{
 		AIC->StopMovement();
 
+		// Grab the target item first
 		const TArray<ABaseItem*>& Items = Inventory->GetInventory();
 		for (int32 i = 0; i < Items.Num(); ++i)
 		{
@@ -119,14 +121,43 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 				{
 					UE_LOG(LogTemp, Log, TEXT("Pickup: Grabbed item type %d into slot %d"),
 						static_cast<int>(TargetItem->GetItemType()), i);
-					BB->ClearValue(FName("TargetItem"));
-					FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
-					return;
+					break;
+				}
+			}
+		}
+
+		// Also grab ALL other nearby items while we're here — no reason to leave and come back
+		TArray<AActor*> AllItems;
+		UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABaseItem::StaticClass(), AllItems);
+		const float GrabRadius = PickupRange + 50.f;
+
+		for (AActor* Actor : AllItems)
+		{
+			ABaseItem* NearbyItem = Cast<ABaseItem>(Actor);
+			if (!NearbyItem || !IsValid(NearbyItem)) continue;
+			if (NearbyItem == TargetItem) continue; // Already grabbed above
+			if (NearbyItem->GetItemType() == EItemType::Garbage) continue;
+
+			const float ItemDist = FVector::Dist(Survivor->GetActorLocation(), NearbyItem->GetActorLocation());
+			if (ItemDist > GrabRadius) continue;
+
+			// Find an empty slot
+			const TArray<ABaseItem*>& CurrentItems = Inventory->GetInventory();
+			for (int32 i = 0; i < CurrentItems.Num(); ++i)
+			{
+				if (CurrentItems[i] == nullptr)
+				{
+					if (Inventory->GrabItem(i, NearbyItem))
+					{
+						UE_LOG(LogTemp, Log, TEXT("Pickup: Grabbed nearby item type %d into slot %d"),
+							static_cast<int>(NearbyItem->GetItemType()), i);
+					}
+					break;
 				}
 			}
 		}
 
 		BB->ClearValue(FName("TargetItem"));
-		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 }

@@ -40,6 +40,13 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	{
 		Stamina = 0.0f;
 	}
+
+	// Auto-stop running when stamina is depleted
+	if (Stamina <= 0.0f && SurvivorOwner && SurvivorOwner->IsRunning())
+	{
+		SurvivorOwner->StopRunning();
+		UE_LOG(LogTemp, Warning, TEXT("Stamina: Exhausted! Forced stop running."));
+	}
 }
 
 void UStaminaComponent::AddStamina(float Amount)
