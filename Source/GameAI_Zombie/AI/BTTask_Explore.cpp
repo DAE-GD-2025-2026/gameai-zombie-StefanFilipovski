@@ -7,7 +7,6 @@
 #include "Common/InventoryComponent.h"
 #include "Items/BaseItem.h"
 #include "Village/House/House.h"
-#include "PurgeZones/PurgeZone.h"
 #include "Kismet/GameplayStatics.h"
 
 UBTTask_Explore::UBTTask_Explore()
@@ -36,39 +35,8 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 	const FVector Origin = Pawn->GetActorLocation();
 	FVector Target = Origin;
 
-	// --- Avoid purge zones: only dodge if we're very close (inside or near the blast radius) ---
-	// Purge zones are small circles (diameter ~100) with a few seconds delay before detonation.
-	// We just need to sidestep them, not panic-sprint across the map.
-	TArray<AActor*> PurgeZones;
-	UGameplayStatics::GetAllActorsOfClass(GetWorld(), APurgeZone::StaticClass(), PurgeZones);
-
-	FVector PurgeAvoidance = FVector::ZeroVector;
-	for (AActor* PZ : PurgeZones)
-	{
-		if (!PZ) continue;
-		const float DistToPurge = FVector::Dist(Origin, PZ->GetActorLocation());
-		if (DistToPurge < 400.f) // Only react when actually near the blast
-		{
-			FVector AwayDir = (Origin - PZ->GetActorLocation()).GetSafeNormal2D();
-			PurgeAvoidance += AwayDir * (400.f - DistToPurge);
-		}
-	}
-
-	if (!PurgeAvoidance.IsNearlyZero())
-	{
-		// Just sidestep the purge zone — short move, no sprinting
-		PurgeAvoidance.Normalize();
-		Target = Origin + PurgeAvoidance * 350.f;
-
-		UE_LOG(LogTemp, Log, TEXT("Explore: Sidestepping purge zone"));
-
-		const EPathFollowingRequestResult::Type Result = AIC->MoveToLocation(Target, 50.f);
-		if (Result == EPathFollowingRequestResult::Failed)
-		{
-			return EBTNodeResult::Succeeded;
-		}
-		return EBTNodeResult::InProgress;
-	}
+	// Purge zones are tiny (diameter ~100) with a multi-second delay.
+	// The survivor is always moving, so we naturally dodge them — no special avoidance needed.
 
 	// --- Check if inventory has space — only visit houses if we can carry items ---
 	bool bHasInventorySpace = false;
@@ -84,7 +52,7 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 		}
 	}
 
-	if (bHasInventorySpace)
+	// Always visit houses — even with full inventory, items respawn and we may find weapons
 	{
 		// --- Find houses to explore, avoiding recently visited ones ---
 		TArray<AActor*> AllHouses;
@@ -115,7 +83,7 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 			}
 		}
 
-		// If all visited, or nearest unvisited is very far (we drifted), reset and go to nearest
+		// If ALL houses visited, reset and start fresh
 		if (UnvisitedHouses.Num() == 0)
 		{
 			VisitedHouses.Empty();
@@ -126,9 +94,10 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 					UnvisitedHouses.Add(House);
 				}
 			}
+			UE_LOG(LogTemp, Log, TEXT("Explore: All %d houses visited, resetting list"), UnvisitedHouses.Num());
 		}
 
-		// Pick the nearest unvisited house — low skip distance so we find clustered houses
+		// Pick the nearest unvisited house — go to it even if far
 		AHouse* BestHouse = nullptr;
 		float BestDist = MAX_FLT;
 		for (AHouse* House : UnvisitedHouses)
@@ -141,55 +110,27 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 			}
 		}
 
-		// If we've drifted too far from all unvisited houses, reset the visited list
-		// and pick the absolute nearest house regardless. Prevents wasting time walking 15k+ units.
-		if (BestDist > 5000.f)
-		{
-			VisitedHouses.Empty();
-			BestHouse = nullptr;
-			BestDist = MAX_FLT;
-			for (AActor* Actor : AllHouses)
-			{
-				AHouse* House = Cast<AHouse>(Actor);
-				if (!House) continue;
-				const float Dist = FVector::Dist(Origin, House->GetActorLocation());
-				if (Dist > 150.f && Dist < BestDist)
-				{
-					BestDist = Dist;
-					BestHouse = House;
-				}
-			}
-			if (BestHouse)
-			{
-				UE_LOG(LogTemp, Log, TEXT("Explore: Drifted too far, resetting visited list"));
-			}
-		}
-
 		if (BestHouse)
 		{
 			FHouseBounds Bounds = BestHouse->GetBounds();
 			Target = Bounds.Origin;
 
-			// Mark as visited
-			VisitedHouses.Add(BestHouse);
+			// Don't mark visited yet — only mark when we actually arrive.
+			// If the BT interrupts us (item pickup, fight), we'll retry this house next time.
+			Memory->TargetHouseLocation = Target;
+			Memory->TargetHouseActorLoc = BestHouse->GetActorLocation();
+			Memory->bHasPendingHouse = true;
 
 			UE_LOG(LogTemp, Log, TEXT("Explore: Heading toward house at %s (dist %.0f, %d unvisited left)"),
-				*Target.ToString(), BestDist, UnvisitedHouses.Num() - 1);
+				*Target.ToString(), BestDist, UnvisitedHouses.Num());
 		}
 		else
 		{
-			// All nearby houses already visited or too close — random wander
+			// All houses too close (within 150) — random wander
 			Target = Origin + FVector(FMath::RandRange(-ExploreRadius, ExploreRadius),
 			                          FMath::RandRange(-ExploreRadius, ExploreRadius), 0.f);
 			UE_LOG(LogTemp, Log, TEXT("Explore: No valid house, random wander"));
 		}
-	}
-	else
-	{
-		// Inventory full — wander randomly, stay mobile to avoid purge zones
-		Target = Origin + FVector(FMath::RandRange(-ExploreRadius, ExploreRadius),
-		                          FMath::RandRange(-ExploreRadius, ExploreRadius), 0.f);
-		UE_LOG(LogTemp, Log, TEXT("Explore: Inventory full, wandering randomly"));
 	}
 
 	const EPathFollowingRequestResult::Type Result = AIC->MoveToLocation(Target, 50.f);
@@ -257,6 +198,31 @@ void UBTTask_Explore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMem
 				Memory->LastCheckedLocation = CurrentPos;
 				Memory->StuckCheckTimer = 0.f;
 			}
+		}
+	}
+
+	// --- Mark house as visited when we actually arrive near it ---
+	if (Pawn && Memory->bHasPendingHouse)
+	{
+		// Check distance against the house's actual actor location (not Bounds.Origin)
+		const float DistToHouse = FVector::Dist2D(Pawn->GetActorLocation(), Memory->TargetHouseActorLoc);
+		if (DistToHouse < 500.f)
+		{
+			// We actually reached the house — now mark it visited
+			TArray<AActor*> AllHouses;
+			UGameplayStatics::GetAllActorsOfClass(GetWorld(), AHouse::StaticClass(), AllHouses);
+			for (AActor* Actor : AllHouses)
+			{
+				AHouse* House = Cast<AHouse>(Actor);
+				if (!House) continue;
+				if (FVector::Dist(House->GetActorLocation(), Memory->TargetHouseActorLoc) < 50.f)
+				{
+					VisitedHouses.Add(House);
+					UE_LOG(LogTemp, Log, TEXT("Explore: Arrived at house, marking visited"));
+					break;
+				}
+			}
+			Memory->bHasPendingHouse = false;
 		}
 	}
 

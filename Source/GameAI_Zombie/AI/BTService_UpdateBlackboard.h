@@ -18,4 +18,8 @@ public:
 
 protected:
 	virtual void TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
+
+private:
+	/** Timer for periodic debug status log */
+	float DebugLogTimer = 0.f;
 };

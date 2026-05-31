@@ -9,7 +9,10 @@ struct FBTExploreMemory
 	float TimeElapsed = 0.f;
 	float StuckCheckTimer = 0.f;
 	FVector LastCheckedLocation = FVector::ZeroVector;
+	FVector TargetHouseLocation = FVector::ZeroVector;   // Bounds.Origin — where we move to
+	FVector TargetHouseActorLoc = FVector::ZeroVector;    // House->GetActorLocation() — for arrival matching
 	bool bInitialized = false;
+	bool bHasPendingHouse = false;
 };
 
 /**

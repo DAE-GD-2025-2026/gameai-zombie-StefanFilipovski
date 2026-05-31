@@ -109,26 +109,33 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 			// Skip garbage items
 			if (Item->GetItemType() == EItemType::Garbage) return;
 
-			// Skip if inventory is full — no point chasing items we can't carry
+			// Skip if inventory is full — unless it's a weapon (we can drop consumables for weapons)
 			UInventoryComponent* Inv = GetInventoryComponent();
 			if (Inv)
 			{
 				bool bHasEmptySlot = false;
+				bool bHasConsumable = false;
 				for (ABaseItem* Slot : Inv->GetInventory())
 				{
 					if (Slot == nullptr) { bHasEmptySlot = true; break; }
+					if (Slot->GetItemType() == EItemType::Food || Slot->GetItemType() == EItemType::Medkit)
+						bHasConsumable = true;
 				}
 				if (!bHasEmptySlot)
 				{
-					UE_LOG(LogTemp, Verbose, TEXT("Perception: Inventory FULL, ignoring item type %d"),
-						static_cast<int>(Item->GetItemType()));
-					return; // inventory full, ignore items
+					const bool bIsWeapon = (Item->GetItemType() == EItemType::Pistol || Item->GetItemType() == EItemType::Shotgun);
+					if (!bIsWeapon || !bHasConsumable)
+					{
+						return; // inventory full, can't make room
+					}
+					// Weapon spotted + we have a consumable to drop — let pickup task handle the swap
 				}
 			}
 
-			// Only update TargetItem if:
-			// 1. We don't have one, OR
-			// 2. This item is closer than the current target
+			// Priority: Weapons > Consumables. Never switch from a weapon to a consumable.
+			// Within the same priority tier, prefer closer items.
+			auto IsWeaponType = [](EItemType T) { return T == EItemType::Pistol || T == EItemType::Shotgun; };
+
 			ABaseItem* CurrentTarget = Cast<ABaseItem>(BB->GetValueAsObject(FName("TargetItem")));
 			if (!CurrentTarget || !IsValid(CurrentTarget))
 			{
@@ -138,13 +145,30 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 			}
 			else
 			{
-				const float DistToNew = FVector::Dist(GetActorLocation(), Item->GetActorLocation());
-				const float DistToCurrent = FVector::Dist(GetActorLocation(), CurrentTarget->GetActorLocation());
-				if (DistToNew < DistToCurrent)
+				const bool bNewIsWeapon = IsWeaponType(Item->GetItemType());
+				const bool bCurrentIsWeapon = IsWeaponType(CurrentTarget->GetItemType());
+
+				bool bShouldSwitch = false;
+				if (bNewIsWeapon && !bCurrentIsWeapon)
+				{
+					// Always switch: weapon beats consumable
+					bShouldSwitch = true;
+				}
+				else if (bNewIsWeapon == bCurrentIsWeapon)
+				{
+					// Same tier — prefer closer
+					const float DistToNew = FVector::Dist(GetActorLocation(), Item->GetActorLocation());
+					const float DistToCurrent = FVector::Dist(GetActorLocation(), CurrentTarget->GetActorLocation());
+					bShouldSwitch = (DistToNew < DistToCurrent);
+				}
+				// else: new is consumable, current is weapon — never switch
+
+				if (bShouldSwitch)
 				{
 					BB->SetValueAsObject(FName("TargetItem"), Item);
-					UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d (closer, switching target)"),
-						static_cast<int>(Item->GetItemType()));
+					UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d (switching: %s)"),
+						static_cast<int>(Item->GetItemType()),
+						(bNewIsWeapon && !bCurrentIsWeapon) ? TEXT("weapon priority") : TEXT("closer"));
 				}
 			}
 		}
