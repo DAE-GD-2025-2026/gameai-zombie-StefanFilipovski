@@ -1,13 +1,9 @@
 #include "BTTask_Explore.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
-#include "BehaviorTree/BlackboardComponent.h"
-#include "NavigationSystem.h"
 #include "Survivor/SurvivorPawn.h"
-#include "Common/InventoryComponent.h"
-#include "Items/BaseItem.h"
 #include "Village/House/House.h"
-#include "Kismet/GameplayStatics.h"
+#include "Common/SteeringComponent.h"
 
 UBTTask_Explore::UBTTask_Explore()
 {
@@ -19,124 +15,85 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 {
 	FBTExploreMemory* Memory = reinterpret_cast<FBTExploreMemory*>(NodeMemory);
 	Memory->TimeElapsed = 0.f;
+	Memory->bInitialized = false;
+	Memory->bHasPendingHouse = false;
 
 	AAIController* AIC = OwnerComp.GetAIOwner();
 	if (!AIC) return EBTNodeResult::Failed;
 
 	APawn* Pawn = AIC->GetPawn();
-	if (!Pawn) return EBTNodeResult::Failed;
-
 	ASurvivorPawn* Survivor = Cast<ASurvivorPawn>(Pawn);
-	if (Survivor)
+	if (!Survivor) return EBTNodeResult::Failed;
+
+	Survivor->StopRunning();
+
+	const FVector Origin = Survivor->GetActorLocation();
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+
+	// Drop stale cooldown entries.
+	for (auto It = HouseCooldownUntil.CreateIterator(); It; ++It)
 	{
-		Survivor->StopRunning();
+		if (!It->Key.IsValid()) It.RemoveCurrent();
 	}
 
-	const FVector Origin = Pawn->GetActorLocation();
-	FVector Target = Origin;
-
-	// Purge zones are tiny (diameter ~100) with a multi-second delay.
-	// The survivor is always moving, so we naturally dodge them — no special avoidance needed.
-
-	// --- Check if inventory has space — only visit houses if we can carry items ---
-	bool bHasInventorySpace = false;
-	if (Survivor)
+	// Pick the nearest PERCEIVED house that isn't on cooldown.
+	AHouse* BestHouse = nullptr;
+	float BestDist = MAX_FLT;
+	for (const TWeakObjectPtr<AActor>& Known : Survivor->GetKnownHouses())
 	{
-		UInventoryComponent* Inv = Survivor->GetInventoryComponent();
-		if (Inv)
-		{
-			for (ABaseItem* Slot : Inv->GetInventory())
-			{
-				if (Slot == nullptr) { bHasInventorySpace = true; break; }
-			}
-		}
+		AHouse* House = Cast<AHouse>(Known.Get());
+		if (!House) continue;
+
+		const float* Until = HouseCooldownUntil.Find(House);
+		if (Until && Now < *Until) continue; // recently visited
+
+		const float Dist = FVector::Dist(Origin, House->GetActorLocation());
+		if (Dist < BestDist) { BestDist = Dist; BestHouse = House; }
 	}
 
-	// Always visit houses — even with full inventory, items respawn and we may find weapons
+	USteeringComponent* Steering = Survivor->GetSteeringComponent();
+
+	if (BestHouse)
 	{
-		// --- Find houses to explore, avoiding recently visited ones ---
-		TArray<AActor*> AllHouses;
-		UGameplayStatics::GetAllActorsOfClass(GetWorld(), AHouse::StaticClass(), AllHouses);
+		// Head to a remembered house via path-following (handles room interiors).
+		const FHouseBounds Bounds = BestHouse->GetBounds();
+		Memory->TargetHouseLocation = Bounds.Origin;
+		Memory->TargetHouseActorLoc = BestHouse->GetActorLocation();
+		Memory->bHasPendingHouse = true;
+		Memory->bWandering = false;
 
-		// Clean up stale visited entries
-		VisitedHouses.RemoveAll([](const TWeakObjectPtr<AActor>& Ptr) { return !Ptr.IsValid(); });
+		if (Steering) Steering->Stop(); // path-following drives now
+		AIC->MoveToLocation(Memory->TargetHouseLocation, 50.f);
 
-		// Build list of unvisited houses
-		TArray<AHouse*> UnvisitedHouses;
-		for (AActor* Actor : AllHouses)
+		UE_LOG(LogTemp, Log, TEXT("Explore: heading to known house (dist %.0f, %d known)"),
+			BestDist, Survivor->GetKnownHouses().Num());
+	}
+	else
+	{
+		// No house available right now (none known yet, or all on cooldown). Wander to discover/
+		// revisit — but stay leashed to the home anchor so we don't drift off across the map.
+		Memory->bWandering = true;
+		const FVector Home = GetHomeAnchor(Survivor);
+		Memory->bReturningHome = (FVector::Dist2D(Origin, Home) > GetEffectiveLeash(Survivor));
+
+		if (Memory->bReturningHome)
 		{
-			AHouse* House = Cast<AHouse>(Actor);
-			if (!House) continue;
-
-			bool bVisited = false;
-			for (const TWeakObjectPtr<AActor>& Visited : VisitedHouses)
-			{
-				if (Visited.Get() == House)
-				{
-					bVisited = true;
-					break;
-				}
-			}
-			if (!bVisited)
-			{
-				UnvisitedHouses.Add(House);
-			}
-		}
-
-		// If ALL houses visited, reset and start fresh
-		if (UnvisitedHouses.Num() == 0)
-		{
-			VisitedHouses.Empty();
-			for (AActor* Actor : AllHouses)
-			{
-				if (AHouse* House = Cast<AHouse>(Actor))
-				{
-					UnvisitedHouses.Add(House);
-				}
-			}
-			UE_LOG(LogTemp, Log, TEXT("Explore: All %d houses visited, resetting list"), UnvisitedHouses.Num());
-		}
-
-		// Pick the nearest unvisited house — go to it even if far
-		AHouse* BestHouse = nullptr;
-		float BestDist = MAX_FLT;
-		for (AHouse* House : UnvisitedHouses)
-		{
-			const float Dist = FVector::Dist(Origin, House->GetActorLocation());
-			if (Dist > 150.f && Dist < BestDist)
-			{
-				BestDist = Dist;
-				BestHouse = House;
-			}
-		}
-
-		if (BestHouse)
-		{
-			FHouseBounds Bounds = BestHouse->GetBounds();
-			Target = Bounds.Origin;
-
-			// Don't mark visited yet — only mark when we actually arrive.
-			// If the BT interrupts us (item pickup, fight), we'll retry this house next time.
-			Memory->TargetHouseLocation = Target;
-			Memory->TargetHouseActorLoc = BestHouse->GetActorLocation();
-			Memory->bHasPendingHouse = true;
-
-			UE_LOG(LogTemp, Log, TEXT("Explore: Heading toward house at %s (dist %.0f, %d unvisited left)"),
-				*Target.ToString(), BestDist, UnvisitedHouses.Num());
+			if (Steering) Steering->Stop();
+			AIC->MoveToLocation(Home, 200.f); // navmesh routes us back to the cluster
+			UE_LOG(LogTemp, Log, TEXT("Explore: too far from cluster (%.0f), heading back"),
+				FVector::Dist2D(Origin, Home));
 		}
 		else
 		{
-			// All houses too close (within 150) — random wander
-			Target = Origin + FVector(FMath::RandRange(-ExploreRadius, ExploreRadius),
-			                          FMath::RandRange(-ExploreRadius, ExploreRadius), 0.f);
-			UE_LOG(LogTemp, Log, TEXT("Explore: No valid house, random wander"));
+			AIC->StopMovement(); // steering drives now
+			if (Steering)
+			{
+				Steering->SetObstacleAvoidanceEnabled(true);
+				Steering->SetSeparationEnabled(false);
+				Steering->WanderAround();
+			}
+			UE_LOG(LogTemp, Log, TEXT("Explore: wandering near cluster to discover/revisit"));
 		}
-	}
-
-	const EPathFollowingRequestResult::Type Result = AIC->MoveToLocation(Target, 50.f);
-	if (Result == EPathFollowingRequestResult::Failed)
-	{
-		return EBTNodeResult::Succeeded;
 	}
 
 	return EBTNodeResult::InProgress;
@@ -154,12 +111,51 @@ void UBTTask_Explore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMem
 		return;
 	}
 
-	APawn* Pawn = AIC->GetPawn();
+	ASurvivorPawn* Survivor = Cast<ASurvivorPawn>(AIC->GetPawn());
 
-	// --- Stuck detection: if we haven't moved much in 2 seconds, abort and pick new target ---
-	if (Pawn)
+	// --- Wander mode: keep roaming; timeout re-evaluates (we may have discovered a house). ---
+	if (Memory->bWandering)
 	{
-		const FVector CurrentPos = Pawn->GetActorLocation();
+		if (Survivor)
+		{
+			USteeringComponent* Steering = Survivor->GetSteeringComponent();
+			const FVector Home = GetHomeAnchor(Survivor);
+			const float DistHome = FVector::Dist2D(Survivor->GetActorLocation(), Home);
+			const float Leash = GetEffectiveLeash(Survivor);
+
+			// Hysteresis: once we exceed the leash, return until we're well back inside it.
+			const bool bWasReturning = Memory->bReturningHome;
+			if (Memory->bReturningHome) { if (DistHome < Leash * 0.6f) Memory->bReturningHome = false; }
+			else                        { if (DistHome > Leash)        Memory->bReturningHome = true;  }
+
+			if (Memory->bReturningHome)
+			{
+				if (!bWasReturning) // just crossed the leash — issue one path back home
+				{
+					if (Steering) Steering->Stop();
+					AIC->MoveToLocation(Home, 200.f);
+				}
+				// else: let path-following carry us home
+			}
+			else if (Steering)
+			{
+				Steering->WanderAround();
+			}
+		}
+		if (Memory->TimeElapsed >= TimeoutSeconds)
+		{
+			FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		}
+		return;
+	}
+
+	// --- House mode (path-following) ---
+	if (Survivor)
+	{
+		// Stuck recovery: if we've barely moved in 2s the navmesh route to this house is blocked
+		// (e.g. arrived in a corner short of the target). Put it on cooldown and re-plan instead of
+		// jittering — navmesh handles the actual cornering, so no random nudge is needed any more.
+		const FVector CurrentPos = Survivor->GetActorLocation();
 		if (!Memory->bInitialized)
 		{
 			Memory->LastCheckedLocation = CurrentPos;
@@ -172,69 +168,82 @@ void UBTTask_Explore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMem
 			if (Memory->StuckCheckTimer >= 2.0f)
 			{
 				const float DistMoved = FVector::Dist2D(CurrentPos, Memory->LastCheckedLocation);
-				if (DistMoved < 80.f) // Barely moved in 2 seconds — we're stuck
+				if (DistMoved < 80.f)
 				{
+					if (Memory->bHasPendingHouse) CooldownHouseNear(Survivor, Memory->TargetHouseActorLoc);
 					AIC->StopMovement();
-
-					// Instead of aborting (which just picks another far house we can't reach),
-					// do a SHORT random move to physically push through doorways and escape rooms.
-					const float RandomAngle = FMath::RandRange(0.f, 360.f);
-					const float RandomDist = FMath::RandRange(200.f, 500.f);
-					FVector EscapeDir = FVector(FMath::Cos(FMath::DegreesToRadians(RandomAngle)),
-					                            FMath::Sin(FMath::DegreesToRadians(RandomAngle)), 0.f);
-					FVector EscapeTarget = CurrentPos + EscapeDir * RandomDist;
-
-					UE_LOG(LogTemp, Log, TEXT("Explore: STUCK (moved %.0f in 2s), short escape move toward %.0f deg"),
-						DistMoved, RandomAngle);
-
-					AIC->MoveToLocation(EscapeTarget, 30.f);
-
-					// Reset stuck check so we re-evaluate after this short move
-					Memory->LastCheckedLocation = CurrentPos;
-					Memory->StuckCheckTimer = 0.f;
+					UE_LOG(LogTemp, Log, TEXT("Explore: stuck near target (moved %.0f in 2s), re-planning"), DistMoved);
+					FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 					return;
 				}
-				// Reset for next check window
 				Memory->LastCheckedLocation = CurrentPos;
 				Memory->StuckCheckTimer = 0.f;
 			}
 		}
-	}
 
-	// --- Mark house as visited when we actually arrive near it ---
-	if (Pawn && Memory->bHasPendingHouse)
-	{
-		// Check distance against the house's actual actor location (not Bounds.Origin)
-		const float DistToHouse = FVector::Dist2D(Pawn->GetActorLocation(), Memory->TargetHouseActorLoc);
-		if (DistToHouse < 500.f)
+		// Reached the house: put it on cooldown (remembered as recently checked) and move on.
+		if (Memory->bHasPendingHouse)
 		{
-			// We actually reached the house — now mark it visited
-			TArray<AActor*> AllHouses;
-			UGameplayStatics::GetAllActorsOfClass(GetWorld(), AHouse::StaticClass(), AllHouses);
-			for (AActor* Actor : AllHouses)
+			const float DistToHouse = FVector::Dist2D(CurrentPos, Memory->TargetHouseActorLoc);
+			if (DistToHouse < 350.f)
 			{
-				AHouse* House = Cast<AHouse>(Actor);
-				if (!House) continue;
-				if (FVector::Dist(House->GetActorLocation(), Memory->TargetHouseActorLoc) < 50.f)
-				{
-					VisitedHouses.Add(House);
-					UE_LOG(LogTemp, Log, TEXT("Explore: Arrived at house, marking visited"));
-					break;
-				}
+				CooldownHouseNear(Survivor, Memory->TargetHouseActorLoc);
+				Memory->bHasPendingHouse = false;
+				UE_LOG(LogTemp, Log, TEXT("Explore: reached house, on cooldown now"));
+				AIC->StopMovement();
+				FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+				return;
 			}
-			Memory->bHasPendingHouse = false;
 		}
 	}
 
-	if (Memory->TimeElapsed >= TimeoutSeconds)
+	// Gave up (timed out or path stopped/failed) before reaching: cooldown the house anyway so we
+	// don't loop on one we can't path to, then re-plan.
+	if (Memory->TimeElapsed >= TimeoutSeconds || AIC->GetMoveStatus() != EPathFollowingStatus::Moving)
 	{
+		if (Memory->bHasPendingHouse) CooldownHouseNear(Survivor, Memory->TargetHouseActorLoc);
 		AIC->StopMovement();
 		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
-		return;
 	}
+}
 
-	if (AIC->GetMoveStatus() != EPathFollowingStatus::Moving)
+FVector UBTTask_Explore::GetHomeAnchor(ASurvivorPawn* Survivor) const
+{
+	if (!Survivor) return FVector::ZeroVector;
+
+	// Anchor on the centroid of the houses we know — that's the cluster we want to stay near and
+	// keep looting. Before we've found any, fall back to the spawn point (the cluster is near it).
+	FVector Sum = FVector::ZeroVector;
+	int32 Count = 0;
+	for (const TWeakObjectPtr<AActor>& H : Survivor->GetKnownHouses())
 	{
-		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		if (H.IsValid()) { Sum += H->GetActorLocation(); ++Count; }
+	}
+	return (Count > 0) ? (Sum / Count) : Survivor->GetSpawnLocation();
+}
+
+float UBTTask_Explore::GetEffectiveLeash(ASurvivorPawn* Survivor) const
+{
+	if (!Survivor || !GetWorld()) return WanderLeash;
+
+	// Stay tight while the local cluster keeps yielding new houses; once it goes quiet for a while,
+	// widen the search so the agent rolls out to discover a fresh cluster. Discovering a new house
+	// resets the timer (in the survivor), which collapses the leash back to base around the new area.
+	const float SinceDiscovery = GetWorld()->GetTimeSeconds() - Survivor->GetLastHouseDiscoveryTime();
+	if (SinceDiscovery <= ClusterExhaustedAfter) return WanderLeash;
+	return FMath::Min(WanderLeash + (SinceDiscovery - ClusterExhaustedAfter) * LeashGrowthPerSec, MaxWanderLeash);
+}
+
+void UBTTask_Explore::CooldownHouseNear(ASurvivorPawn* Survivor, const FVector& HouseActorLoc)
+{
+	if (!Survivor || !GetWorld()) return;
+	const float Now = GetWorld()->GetTimeSeconds();
+	for (const TWeakObjectPtr<AActor>& Known : Survivor->GetKnownHouses())
+	{
+		if (Known.IsValid() && FVector::Dist(Known->GetActorLocation(), HouseActorLoc) < 50.f)
+		{
+			HouseCooldownUntil.Add(Known, Now + HouseRevisitCooldown);
+			break;
+		}
 	}
 }

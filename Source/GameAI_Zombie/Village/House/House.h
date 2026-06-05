@@ -6,6 +6,8 @@
 #include "GameFramework/Actor.h"
 #include "House.generated.h"
 
+class UAIPerceptionStimuliSourceComponent;
+
 USTRUCT(BlueprintType)
 struct GAMEAI_ZOMBIE_API FHouseBounds
 {
@@ -27,7 +29,12 @@ public:
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
-	
+
+	// Lets the survivor's AIPerception (sight) discover this house, so exploration is
+	// driven by perception rather than a global world query.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Perception")
+	UAIPerceptionStimuliSourceComponent* StimuliSource;
+
 
 public:
 	// Called every frame

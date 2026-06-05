@@ -4,6 +4,7 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Survivor/SurvivorPawn.h"
 #include "Common/InventoryComponent.h"
+#include "Common/SteeringComponent.h"
 #include "Items/BaseItem.h"
 #include "Items/ItemType.h"
 
@@ -24,6 +25,12 @@ EBTNodeResult::Type UBTTask_FightEnemy::ExecuteTask(UBehaviorTreeComponent& Owne
 
 	AActor* Enemy = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
 	if (!Enemy) return EBTNodeResult::Failed;
+
+	// We chase via path-following; ensure steering (from a prior Pickup/Flee) isn't fighting it.
+	if (ASurvivorPawn* Survivor = Cast<ASurvivorPawn>(AIC->GetPawn()))
+	{
+		if (Survivor->GetSteeringComponent()) Survivor->GetSteeringComponent()->Stop();
+	}
 
 	AIC->MoveToActor(Enemy, AttackRange - 50.f);
 

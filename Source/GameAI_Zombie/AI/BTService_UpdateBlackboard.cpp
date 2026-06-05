@@ -92,10 +92,32 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 	// --- Flee decision ---
-	// Only flee from enemies when we're in real danger — no weapon + low HP, or critically low HP.
-	// Purge zones are handled by sidestepping in the Explore/Flee tasks, NOT by triggering bShouldFlee.
-	const bool bEnemyVisible = BB->GetValueAsObject(FName("TargetEnemy")) != nullptr;
-	const bool bShouldFlee = bEnemyVisible && ((HealthPct < 0.3f && !bHasWeapon) || HealthPct < 0.15f);
+	// Flee when we can't win: no weapon and taking damage (HP < 50%), or critically low HP.
+	// With a weapon we prefer to stand and fight (handled by the Fight branch).
+	// Flee decision.
+	// With NO weapon we can't fight, so be cautious: back away from a nearby zombie even at full
+	// HP (don't wait to be chased), and always retreat once hurt. With a weapon we stand and
+	// fight until HP is genuinely low.
+	AActor* EnemyForFlee = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
+	const bool bEnemyVisible = EnemyForFlee != nullptr;
+	const float EnemyDist = EnemyForFlee
+		? FVector::Dist(Survivor->GetActorLocation(), EnemyForFlee->GetActorLocation())
+		: MAX_FLT;
+	const bool bEnemyClose = bEnemyVisible && EnemyDist < 700.f;
+	const bool bWantFlee = bEnemyVisible &&
+		((!bHasWeapon && (bEnemyClose || HealthPct < 0.7f)) || HealthPct < 0.25f);
+
+	// Hysteresis: latch fleeing ON when we want to flee, and only release it once the enemy is
+	// clearly far (or gone). This stops the flee state from flickering when a chaser hovers around
+	// the trigger distance, which was making the BT abort/re-enter Flee every frame.
+	if (!bEnemyVisible)            bFleeLatched = false;
+	else if (bWantFlee)           bFleeLatched = true;
+	else if (EnemyDist > 1200.f)  bFleeLatched = false;
+
+	// Lethal purge zone overrides everything — if we're standing in a blast radius, flee out of it
+	// (the Flee task targets the way out) regardless of enemies.
+	const bool bInPurgeZone = (Survivor->GetActivePurgeZoneDanger() != nullptr);
+	const bool bShouldFlee = bInPurgeZone || (bEnemyVisible && bFleeLatched);
 
 	// Need heal: HP < 70% and we have a medkit.
 	// During combat: only heal if HP is critical (<50%) or we have no weapon (can't fight anyway).
@@ -181,13 +203,18 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 	// --- Validate TargetItem (clear if destroyed, picked up, or inventory full) ---
 	AActor* TargetItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
 	bool bHasEmptySlot = false;
+	int32 ConsumableCount = 0;
 	if (Inventory)
 	{
 		for (ABaseItem* Slot : Inventory->GetInventory())
 		{
-			if (Slot == nullptr) { bHasEmptySlot = true; break; }
+			if (Slot == nullptr) { bHasEmptySlot = true; continue; }
+			if (IsConsumable(Slot->GetItemType())) ++ConsumableCount;
 		}
 	}
+	// Even with a full bag we can still take a WEAPON, because Pickup drops a spare consumable for
+	// it (keeping at least one). This stops the agent leaving a second weapon behind in a house.
+	const bool bCanDropForWeapon = (ConsumableCount >= 2);
 
 	if (TargetItem)
 	{
@@ -198,15 +225,20 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 		else if (!bHasEmptySlot)
 		{
-			BB->ClearValue(FName("TargetItem"));
-			TargetItem = nullptr;
+			ABaseItem* TI = Cast<ABaseItem>(TargetItem);
+			const bool bKeepWeaponTarget = TI && IsWeapon(TI->GetItemType()) && bCanDropForWeapon;
+			if (!bKeepWeaponTarget)
+			{
+				BB->ClearValue(FName("TargetItem"));
+				TargetItem = nullptr;
+			}
 		}
 	}
 
 	// If we have no target item but have inventory space, re-scan perception for visible items.
 	// OnPerceptionUpdated only fires on state changes — items already in sight won't re-trigger.
 	// Prioritize weapons over consumables when choosing what to go after.
-	if (!TargetItem && bHasEmptySlot && Survivor->GetPerceptionComponent())
+	if (!TargetItem && (bHasEmptySlot || bCanDropForWeapon) && Survivor->GetPerceptionComponent())
 	{
 		TArray<AActor*> PerceivedActors;
 		Survivor->GetPerceptionComponent()->GetCurrentlyPerceivedActors(nullptr, PerceivedActors);
@@ -218,6 +250,8 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			ABaseItem* Item = Cast<ABaseItem>(Actor);
 			if (!Item || !IsValid(Item)) continue;
 			if (Item->GetItemType() == EItemType::Garbage) continue;
+			// With a full bag, only a weapon is worth going for (we'd drop a consumable for it).
+			if (!bHasEmptySlot && !IsWeapon(Item->GetItemType())) continue;
 
 			const float Dist = FVector::Dist(Survivor->GetActorLocation(), Item->GetActorLocation());
 
@@ -272,13 +306,16 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			? TEXT("YES") : TEXT("no");
 		const FString ItemStr = BB->GetValueAsObject(FName("TargetItem"))
 			? TEXT("YES") : TEXT("no");
-		const FString FleeStr = BB->GetValueAsBool(FName("bShouldFlee"))
-			? TEXT("FLEE") : TEXT("ok");
+		const FString FleeStr = bInPurgeZone
+			? TEXT("FLEE(PURGE)")
+			: (BB->GetValueAsBool(FName("bShouldFlee")) ? TEXT("FLEE") : TEXT("ok"));
 
-		UE_LOG(LogTemp, Warning, TEXT("STATUS: HP=%.0f%% Stam=%.0f%% Weapon=%s Enemy=%s Item=%s %s | Inv: %s"),
+		UE_LOG(LogTemp, Warning, TEXT("STATUS [T=%.0fs]: HP=%.0f%% Stam=%.0f%% Weapon=%s Enemy=%s Item=%s %s | Houses=%d | Inv: %s"),
+			Survivor->GetSurvivalTime(),
 			HealthPct * 100.f, StaminaPct * 100.f,
 			bHasWeapon ? TEXT("YES") : TEXT("no"),
 			*EnemyStr, *ItemStr, *FleeStr,
+			Survivor->GetKnownHouseCount(),
 			*InvStr);
 	}
 }

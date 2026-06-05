@@ -22,4 +22,8 @@ protected:
 private:
 	/** Timer for periodic debug status log */
 	float DebugLogTimer = 0.f;
+
+	/** Hysteresis for the flee decision: once we start fleeing we stay committed until the
+	 *  enemy is clearly far/gone, instead of flickering when a chaser hovers near the trigger range. */
+	bool bFleeLatched = false;
 };

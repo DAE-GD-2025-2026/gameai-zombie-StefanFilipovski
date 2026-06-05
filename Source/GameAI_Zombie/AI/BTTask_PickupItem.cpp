@@ -6,7 +6,8 @@
 #include "Common/InventoryComponent.h"
 #include "Items/BaseItem.h"
 #include "Items/ItemType.h"
-#include "Kismet/GameplayStatics.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Common/SteeringComponent.h"
 
 namespace
 {
@@ -113,12 +114,15 @@ EBTNodeResult::Type UBTTask_PickupItem::ExecuteTask(UBehaviorTreeComponent& Owne
 		}
 	}
 
-	const float PickupRange = Inventory->GetPickupRange();
-	const EPathFollowingRequestResult::Type Result = AIC->MoveToActor(TargetItem, PickupRange - 10.f);
-	if (Result == EPathFollowingRequestResult::Failed)
+	// Approach the item with Arrive steering (smooth decelerating approach, no overshoot).
+	// Avoidance stays off so we don't get deflected away from items inside tight rooms;
+	// the timeout below bounds the cost if an item is unreachable.
+	AIC->StopMovement(); // clear any leftover path-following request from Explore/Fight
+	if (USteeringComponent* Steering = Survivor->GetSteeringComponent())
 	{
-		BB->ClearValue(FName("TargetItem"));
-		return EBTNodeResult::Failed;
+		Steering->SetObstacleAvoidanceEnabled(false);
+		Steering->SetSeparationEnabled(false);
+		Steering->ArriveAt(TargetItem->GetActorLocation());
 	}
 
 	return EBTNodeResult::InProgress;
@@ -143,7 +147,7 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 	// Item gone or destroyed
 	if (!Survivor || !TargetItem || !IsValid(TargetItem))
 	{
-		AIC->StopMovement();
+		if (Survivor && Survivor->GetSteeringComponent()) Survivor->GetSteeringComponent()->Stop();
 		BB->ClearValue(FName("TargetItem"));
 		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		return;
@@ -152,7 +156,7 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 	// Timeout — give up on this item
 	if (Memory->TimeElapsed >= TimeoutSeconds)
 	{
-		AIC->StopMovement();
+		if (Survivor->GetSteeringComponent()) Survivor->GetSteeringComponent()->Stop();
 		BB->ClearValue(FName("TargetItem"));
 		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		return;
@@ -165,12 +169,18 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 		return;
 	}
 
+	// Keep steering toward the item each frame.
+	if (USteeringComponent* Steering = Survivor->GetSteeringComponent())
+	{
+		Steering->ArriveAt(TargetItem->GetActorLocation());
+	}
+
 	const float Dist = FVector::Dist(Survivor->GetActorLocation(), TargetItem->GetActorLocation());
 	const float PickupRange = Inventory->GetPickupRange();
 
 	if (Dist <= PickupRange + 20.f)
 	{
-		AIC->StopMovement();
+		if (USteeringComponent* Steering = Survivor->GetSteeringComponent()) Steering->Stop();
 
 		// Grab the target item first
 		const TArray<ABaseItem*>& Items = Inventory->GetInventory();
@@ -187,16 +197,19 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 			}
 		}
 
-		// Also grab ALL other nearby items while we're here — no reason to leave and come back
-		// Collect nearby items, sorted: weapons first so we prioritize them
-		TArray<AActor*> AllItems;
-		UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABaseItem::StaticClass(), AllItems);
+		// Also grab other nearby items while we're here — but ONLY ones we've actually
+		// perceived (no world-omniscient queries; keeps us compliant with AIPerception).
+		TArray<AActor*> PerceivedActors;
+		if (Survivor->GetPerceptionComponent())
+		{
+			Survivor->GetPerceptionComponent()->GetCurrentlyPerceivedActors(nullptr, PerceivedActors);
+		}
 		const float GrabRadius = PickupRange + 50.f;
 
 		TArray<ABaseItem*> NearbyWeapons;
 		TArray<ABaseItem*> NearbyConsumables;
 
-		for (AActor* Actor : AllItems)
+		for (AActor* Actor : PerceivedActors)
 		{
 			ABaseItem* NearbyItem = Cast<ABaseItem>(Actor);
 			if (!NearbyItem || !IsValid(NearbyItem)) continue;
