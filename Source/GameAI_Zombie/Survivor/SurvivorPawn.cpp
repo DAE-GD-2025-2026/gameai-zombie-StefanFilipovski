@@ -16,6 +16,7 @@
 #include "SurvivorAIController.h"
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
+#include "EngineUtils.h"
 
 ASurvivorPawn::ASurvivorPawn()
 {
@@ -39,10 +40,11 @@ ASurvivorPawn::ASurvivorPawn()
 
 	// ---- Sight Sense ----
 	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
-	SightConfig->SightRadius = 1000.0f;
-	SightConfig->LoseSightRadius = 1500.0f;
-	// Forward vision cone — used to spot items and see threats ahead. The rear blind spot is
-	// covered by the Hearing sense below, so we keep sight realistic rather than all-seeing.
+	SightConfig->SightRadius = 1400.0f;       // reach far enough to spot houses/items while roaming
+	SightConfig->LoseSightRadius = 1900.0f;
+	// Forward 240° vision cone (±120° half-angle) for spotting houses and items. The rear blind spot
+	// is handled two ways: a one-time 360° spin scan on spawn (to find the local cluster), and the
+	// Hearing sense for all-around threat awareness during play.
 	SightConfig->PeripheralVisionAngleDegrees = 120.0f;
 	SightConfig->DetectionByAffiliation.bDetectEnemies = true;
 	SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
@@ -91,6 +93,7 @@ void ASurvivorPawn::BeginPlay()
 	if (HealthComponent)
 	{
 		HealthComponent->OnDeath.AddDynamic(this, &ASurvivorPawn::OnSurvivorDeath);
+		HealthComponent->OnDamaged.AddDynamic(this, &ASurvivorPawn::OnSurvivorDamaged);
 	}
 	UE_LOG(LogTemp, Warning, TEXT("SURVIVOR: spawned at %s — run started"), *GetActorLocation().ToString());
 }
@@ -101,6 +104,35 @@ void ASurvivorPawn::OnSurvivorDeath()
 	const float Survived = Now - SpawnTime;
 	UE_LOG(LogTemp, Warning, TEXT("SURVIVOR: DIED — survived %.1f seconds (%.0f min %.0f sec)"),
 		Survived, FMath::FloorToFloat(Survived / 60.f), FMath::Fmod(Survived, 60.f));
+}
+
+void ASurvivorPawn::OnSurvivorDamaged()
+{
+	// We were hit — the attacker may be in our sight blind spot or behind us, and the damage carried no
+	// instigator. Acquire the NEAREST zombie (a melee attacker is right on top of us) as the target so
+	// the Fight branch turns to face it and shoots back, instead of taking free hits from behind.
+	ASurvivorAIController* AIC = Cast<ASurvivorAIController>(GetController());
+	if (!AIC || !GetWorld()) return;
+	UBlackboardComponent* BB = AIC->GetBB();
+	if (!BB) return;
+
+	const FVector MyLoc = GetActorLocation();
+	ABaseZombie* Nearest = nullptr;
+	float BestDist = 700.f; // melee range — close enough that it's almost certainly our attacker
+	for (TActorIterator<ABaseZombie> It(GetWorld()); It; ++It)
+	{
+		ABaseZombie* Z = *It;
+		if (!Z) continue;
+		const float D = FVector::Dist2D(MyLoc, Z->GetActorLocation());
+		if (D < BestDist) { BestDist = D; Nearest = Z; }
+	}
+
+	if (Nearest)
+	{
+		BB->SetValueAsObject(FName("TargetEnemy"), Nearest);
+		BB->SetValueAsVector(FName("LastKnownEnemyLocation"), Nearest->GetActorLocation());
+		UE_LOG(LogTemp, Warning, TEXT("Damage: hit by an unseen enemy — turning to fight nearest zombie (%.0f units)"), BestDist);
+	}
 }
 
 void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
@@ -116,18 +148,8 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 
 	const bool bSensed = Stimulus.WasSuccessfullySensed();
 
-	// --- HOUSE perceived: remember it so exploration can head there later ---
-	if (Cast<AHouse>(Actor))
-	{
-		if (bSensed && !KnownHouses.Contains(Actor))
-		{
-			KnownHouses.Add(Actor);
-			LastHouseDiscoveryTime = GetWorld() ? GetWorld()->GetTimeSeconds() : LastHouseDiscoveryTime;
-			UE_LOG(LogTemp, Log, TEXT("Perception: House DISCOVERED at %s (%d known)"),
-				*Actor->GetActorLocation().ToString(), KnownHouses.Num());
-		}
-		return;
-	}
+	// Houses are discovered by the radial live query in Tick (not the sight cone), so ignore them here.
+	if (Cast<AHouse>(Actor)) return;
 
 	// --- PURGE ZONE perceived: remember it so we can flee its blast radius ---
 	if (Cast<APurgeZone>(Actor))
@@ -175,6 +197,17 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 		{
 			// Skip garbage items
 			if (Item->GetItemType() == EItemType::Garbage) return;
+
+			// Remember weapon spots so we can come back to re-arm if we run dry later.
+			if (Item->GetItemType() == EItemType::Pistol || Item->GetItemType() == EItemType::Shotgun)
+			{
+				bool bAlreadyKnown = false;
+				for (const FVector& L : KnownWeaponLocations)
+				{
+					if (FVector::Dist2D(L, Item->GetActorLocation()) < 250.f) { bAlreadyKnown = true; break; }
+				}
+				if (!bAlreadyKnown) KnownWeaponLocations.Add(Item->GetActorLocation());
+			}
 
 			// Skip if inventory is full — unless it's a weapon (we can drop consumables for weapons)
 			UInventoryComponent* Inv = GetInventoryComponent();
@@ -243,6 +276,14 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 	}
 }
 
+void ASurvivorPawn::ForgetWeaponNear(const FVector& Loc, float Radius)
+{
+	for (int32 i = KnownWeaponLocations.Num() - 1; i >= 0; --i)
+	{
+		if (FVector::Dist2D(KnownWeaponLocations[i], Loc) < Radius) KnownWeaponLocations.RemoveAt(i);
+	}
+}
+
 APurgeZone* ASurvivorPawn::GetActivePurgeZoneDanger() const
 {
 	const FVector MyLoc = GetActorLocation();
@@ -276,9 +317,41 @@ APurgeZone* ASurvivorPawn::GetActivePurgeZoneDanger() const
 	return Nearest;
 }
 
+void ASurvivorPawn::RequestScan()
+{
+	if (bScanning) return;
+	bScanning = true;
+	ScanElapsed = 0.f;
+	ScanStartYaw = GetActorRotation().Yaw;
+}
+
 void ASurvivorPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Live house query: periodically become aware of any house within HouseSenseRadius, in ANY
+	// direction. This is how we acquire house knowledge — distance-based proximity rather than the
+	// forward sight cone — so we reliably notice nearby buildings instead of walking past ones that
+	// happen to be off to our side. Knowledge still grows with exploration (we only learn houses we
+	// come near), we just don't depend on facing them.
+	HouseQueryTimer += DeltaTime;
+	if (HouseQueryTimer >= HouseQueryInterval && GetWorld())
+	{
+		HouseQueryTimer = 0.f;
+		const FVector MyLoc = GetActorLocation();
+		for (TActorIterator<AHouse> It(GetWorld()); It; ++It)
+		{
+			AHouse* H = *It;
+			if (!H) continue;
+			if (FVector::Dist2D(MyLoc, H->GetActorLocation()) > HouseSenseRadius) continue;
+			if (KnownHouses.Contains(H)) continue;
+
+			KnownHouses.Add(H);
+			LastHouseDiscoveryTime = GetWorld()->GetTimeSeconds();
+			UE_LOG(LogTemp, Log, TEXT("Knowledge: house discovered — %s at %s (%d known)"),
+				*H->GetHouseTypeString(), *H->GetActorLocation().ToString(), KnownHouses.Num());
+		}
+	}
 
 	// Keep the survivor pinned to its ground height. Without this, being pushed into a wall
 	// or walking into a zombie can make the capsule ride up and "climb" onto geometry.

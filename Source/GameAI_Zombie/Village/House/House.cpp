@@ -40,3 +40,42 @@ FHouseBounds AHouse::GetBounds() const
 	GetActorBounds(true, Origin, Extent);
 	return {Origin, Extent};
 }
+
+EHouseType AHouse::GetHouseType() const
+{
+	// Blueprint instances report a class name like "BP_HouseA_C" — match the variant suffix. Check the
+	// A/B/C variants BEFORE the generic "House" (they also contain "House").
+	const FString N = GetClass() ? GetClass()->GetName() : FString();
+	if (N.Contains(TEXT("HouseA"))) return EHouseType::SquareTwoDoor;
+	if (N.Contains(TEXT("HouseB"))) return EHouseType::Rectangle;
+	if (N.Contains(TEXT("HouseC"))) return EHouseType::OpenCorners;
+	if (N.Contains(TEXT("House")))  return EHouseType::Square;
+	return EHouseType::Unknown;
+}
+
+FString AHouse::GetHouseTypeString() const
+{
+	switch (GetHouseType())
+	{
+	case EHouseType::Square:        return TEXT("Square(1 door)");
+	case EHouseType::SquareTwoDoor: return TEXT("Square(2 doors)");
+	case EHouseType::Rectangle:     return TEXT("Rectangle(1 door)");
+	case EHouseType::OpenCorners:   return TEXT("OpenCorners(4 doors)");
+	default:                        return TEXT("Unknown");
+	}
+}
+
+void AHouse::GetCornerOpenings(FVector OutCorners[4], float Inset) const
+{
+	const FHouseBounds B = GetBounds();
+	// Clamp the inset so it can't cross the centre on a small/narrow house.
+	const float IX = FMath::Min(Inset, B.Extent.X * 0.5f);
+	const float IY = FMath::Min(Inset, B.Extent.Y * 0.5f);
+	const float SX = FMath::Max(B.Extent.X - IX, 0.f);
+	const float SY = FMath::Max(B.Extent.Y - IY, 0.f);
+
+	OutCorners[0] = B.Origin + FVector(+SX, +SY, 0.f);
+	OutCorners[1] = B.Origin + FVector(+SX, -SY, 0.f);
+	OutCorners[2] = B.Origin + FVector(-SX, +SY, 0.f);
+	OutCorners[3] = B.Origin + FVector(-SX, -SY, 0.f);
+}

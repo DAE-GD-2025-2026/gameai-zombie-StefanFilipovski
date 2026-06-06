@@ -66,6 +66,11 @@ protected:
 	UFUNCTION()
 	void OnSurvivorDeath();
 
+	/** Bound to HealthComponent->OnDamaged — we got hit (possibly from a blind spot), so acquire the
+	 *  nearest zombie as the target enemy and turn to fight it. */
+	UFUNCTION()
+	void OnSurvivorDamaged();
+
 	/** Game time (seconds) captured at spawn, used to report survival duration on death. */
 	float SpawnTime{0.f};
 
@@ -78,13 +83,34 @@ protected:
 	float GroundZ{0.f};
 	bool bGroundZSet{false};
 
-	/** Memory of houses we've actually perceived (via sight). Exploration only targets these,
-	 *  so the agent discovers rooms through perception rather than a global world query. */
+	/** One-time startup scan: the survivor spins a full 360° on spawn so its (forward) sight cone
+	 *  sweeps all around and reliably discovers the nearby house cluster before it starts moving. */
+	bool bScanning{false};
+	float ScanElapsed{0.f};
+	float ScanStartYaw{0.f};
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite)
+	float ScanDuration{1.5f};
+
+	/** Memory of houses we know about. Filled by a periodic radial "live query" (see Tick): any house
+	 *  within HouseSenseRadius of us gets remembered. This is still perception-style discovery — we only
+	 *  learn about houses we physically come near — but it's 360° and distance-based, so finding a static
+	 *  building no longer depends on which way our sight cone happens to point. */
 	TArray<TWeakObjectPtr<AActor>> KnownHouses;
+
+	/** Radius of the radial house "live query": we become aware of houses this close, any direction. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite)
+	float HouseSenseRadius{1500.f};
+	float HouseQueryTimer{0.f};
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite)
+	float HouseQueryInterval{0.4f};
 
 	/** Game time the most recent NEW house was discovered. Exploration uses this to widen its search
 	 *  radius once the local cluster has gone a while without yielding anything new. */
 	float LastHouseDiscoveryTime{0.f};
+
+	/** Locations where we perceived a weapon we didn't take (bag was full of guns). If we run dry we
+	 *  head back to the nearest one to re-arm — items also respawn there. */
+	TArray<FVector> KnownWeaponLocations;
 
 	/** Purge zones (lethal AoE hazards) we've perceived via sight. The agent flees any it's standing in. */
 	TArray<TWeakObjectPtr<AActor>> KnownPurgeZones;
@@ -118,8 +144,19 @@ public:
 	/** Where the survivor spawned — exploration's anchor point. */
 	FVector GetSpawnLocation() const { return SpawnLocation; }
 
+	/** Remembered weapon-sighting locations, and a way to forget one once it's gone/looted. */
+	const TArray<FVector>& GetKnownWeaponLocations() const { return KnownWeaponLocations; }
+	void ForgetWeaponNear(const FVector& Loc, float Radius = 400.f);
+
 	/** Game time when the last new house was discovered (for widening the exploration radius). */
 	float GetLastHouseDiscoveryTime() const { return LastHouseDiscoveryTime; }
+
+	/** True while the survivor is doing a 360° scan; exploration holds until it's done. */
+	bool IsScanning() const { return bScanning; }
+
+	/** Begin a 360° spin scan (used both at spawn and periodically while exploring) to sweep the
+	 *  sight cone all around and spot houses/items we aren't currently facing. No-op if already scanning. */
+	void RequestScan();
 
 	/** If the survivor is currently inside (or right at the edge of) a perceived purge zone's blast
 	 *  radius, returns that zone (nearest one) so the AI can flee out of it; otherwise nullptr. */

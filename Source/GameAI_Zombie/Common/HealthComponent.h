@@ -8,6 +8,8 @@
 
 // Declare OnDeath
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeathSignature);
+// Broadcast whenever damage is taken (so the AI can react to being hit — e.g. by an attacker it can't see).
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDamagedSignature);
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class GAMEAI_ZOMBIE_API UHealthComponent final : public UActorComponent
@@ -37,6 +39,9 @@ public:
 	
 	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Health")
 	FOnDeathSignature OnDeath;
+
+	UPROPERTY(BlueprintAssignable, BlueprintCallable, Category = "Health")
+	FOnDamagedSignature OnDamaged;
 	
 protected:
 	void HandleDeath() const;

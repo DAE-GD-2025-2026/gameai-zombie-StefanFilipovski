@@ -100,12 +100,41 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 	// fight until HP is genuinely low.
 	AActor* EnemyForFlee = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
 	const bool bEnemyVisible = EnemyForFlee != nullptr;
+	const FVector MyLoc = Survivor->GetActorLocation();
 	const float EnemyDist = EnemyForFlee
-		? FVector::Dist(Survivor->GetActorLocation(), EnemyForFlee->GetActorLocation())
+		? FVector::Dist(MyLoc, EnemyForFlee->GetActorLocation())
 		: MAX_FLT;
 	const bool bEnemyClose = bEnemyVisible && EnemyDist < 700.f;
-	const bool bWantFlee = bEnemyVisible &&
-		((!bHasWeapon && (bEnemyClose || HealthPct < 0.7f)) || HealthPct < 0.25f);
+
+	// If we're unarmed but a weapon is within quick reach, ARM UP rather than flee to our death:
+	// suppress fleeing so the Pickup→Fight branches grab it and fight back. Fleeing an adjacent zombie
+	// with no weapon (and no escape) is how the survivor kept getting cornered and killed.
+	float NearestWeaponDist = MAX_FLT;
+	if (!bHasWeapon)
+	{
+		if (UAIPerceptionComponent* Perc = Survivor->GetPerceptionComponent())
+		{
+			TArray<AActor*> Perceived;
+			Perc->GetCurrentlyPerceivedActors(nullptr, Perceived);
+			for (AActor* A : Perceived)
+			{
+				ABaseItem* It = Cast<ABaseItem>(A);
+				if (It && IsValid(It) && IsWeapon(It->GetItemType()))
+					NearestWeaponDist = FMath::Min(NearestWeaponDist, FVector::Dist(MyLoc, It->GetActorLocation()));
+			}
+		}
+		for (const FVector& W : Survivor->GetKnownWeaponLocations())
+			NearestWeaponDist = FMath::Min(NearestWeaponDist, FVector::Dist2D(MyLoc, W));
+	}
+	const bool bWeaponWithinReach = !bHasWeapon && NearestWeaponDist < 1000.f;
+
+	// Flee is for genuine danger ONLY. We can't truly outrun zombies, so the winning play is to keep
+	// pursuing houses/weapons (Explore avoids enemy-adjacent houses and sprints under threat), arm up,
+	// and fight back. So flee only when: critically hurt, or genuinely cornered — unarmed with no
+	// weapon to grab AND no house to fall back to. Otherwise we stay aggressive and goal-seeking.
+	const bool bHouseKnown = Survivor->GetKnownHouseCount() > 0;
+	const bool bCornered = !bHasWeapon && !bWeaponWithinReach && !bHouseKnown && bEnemyClose;
+	const bool bWantFlee = bEnemyVisible && (HealthPct < 0.25f || bCornered);
 
 	// Hysteresis: latch fleeing ON when we want to flee, and only release it once the enemy is
 	// clearly far (or gone). This stops the flee state from flickering when a chaser hovers around
@@ -153,10 +182,11 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// --- Inventory management: drop consumables to make room for weapons ---
-	// Priority: Weapons > everything else. If inventory is full of consumables and we
-	// have no weapons, proactively drop the least useful consumable so we can pick up weapons.
-	if (Inventory && !bHasWeapon)
+	// --- Inventory management: keep room for weapons ---
+	// We want to carry up to TWO weapons so emptying one doesn't leave us defenceless. If the bag is
+	// full, we hold fewer than two weapons, and we have a comfortable consumable surplus (3+, so we
+	// keep at least two after dropping), proactively drop the least useful consumable to free a slot.
+	if (Inventory)
 	{
 		const TArray<ABaseItem*>& InvItems = Inventory->GetInventory();
 		bool bInvFull = true;
@@ -188,11 +218,12 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			}
 		}
 
-		// If inventory is full, no weapons, and we have 2+ consumables, drop the worst one
-		// to leave a slot open for picking up a weapon
-		if (bInvFull && WeaponCount == 0 && (MedkitCount + FoodCount) >= 2 && WorstConsumableSlot >= 0)
+		// Full bag, fewer than two weapons, 3+ consumables → drop the worst consumable to leave a slot
+		// open for a weapon (keeps at least two consumables).
+		if (bInvFull && WeaponCount < 2 && (MedkitCount + FoodCount) >= 3 && WorstConsumableSlot >= 0)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("STATUS: No weapons! Dropping %s(%d) from slot %d to make room"),
+			UE_LOG(LogTemp, Warning, TEXT("STATUS: Only %d weapon(s) — dropping %s(%d) from slot %d to keep room for a weapon"),
+				WeaponCount,
 				ItemTypeName(InvItems[WorstConsumableSlot]->GetItemType()),
 				InvItems[WorstConsumableSlot]->GetValue(),
 				WorstConsumableSlot);
