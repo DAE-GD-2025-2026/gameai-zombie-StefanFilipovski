@@ -1,4 +1,4 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 
 #include "SurvivorPawn.h"
@@ -17,13 +17,7 @@
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
 #include "EngineUtils.h"
-#include "DrawDebugHelpers.h"
 #include "Items/ItemType.h"
-
-// Runtime toggle for the on-screen AI debug visualizers
-static TAutoConsoleVariable<int32> CVarSurvivorDebug(
-	TEXT("ai.SurvivorDebug"), 1,
-	TEXT("Draw Survivor AI debug visualizers (0 = off, 1 = on)."), ECVF_Cheat);
 
 ASurvivorPawn::ASurvivorPawn()
 {
@@ -44,19 +38,19 @@ ASurvivorPawn::ASurvivorPawn()
 	// Senses
 	PerceptionComp = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("PerceptionComp"));
 
-	// Sight Sense 
+	// Sight Sense
 	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
 	SightConfig->SightRadius = 1400.0f;
 	SightConfig->LoseSightRadius = 1900.0f;
-	
+
 	SightConfig->PeripheralVisionAngleDegrees = 90.0f;
 	SightConfig->DetectionByAffiliation.bDetectEnemies = true;
 	SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
 
-	// Damage Sense 
+	// Damage Sense
 	DamageConfig = CreateDefaultSubobject<UAISenseConfig_Damage>(TEXT("DamageConfig"));
 
-	// Hearing Sense 
+	// Hearing Sense
 	HearingConfig = CreateDefaultSubobject<UAISenseConfig_Hearing>(TEXT("HearingConfig"));
 	HearingConfig->HearingRange = 1300.0f;
 	HearingConfig->SetMaxAge(1.5f);
@@ -68,7 +62,7 @@ ASurvivorPawn::ASurvivorPawn()
 	PerceptionComp->ConfigureSense(*DamageConfig);
 	PerceptionComp->ConfigureSense(*HearingConfig);
 
-	
+
 	PerceptionComp->SetDominantSense(SightConfig->GetSenseImplementation());
 }
 
@@ -260,7 +254,7 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 					const bool bCanDropForConsumable = bNeededConsumable && WeaponCount >= 3;
 					if (!bCanDropForWeapon && !bCanDropForConsumable)
 					{
-						return; 
+						return;
 					}
 					// Let the pickup task handle the swap.
 				}
@@ -273,8 +267,8 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 			auto ItemPriority = [HpPct](EItemType T) -> int
 			{
 				if (HpPct < 0.3f && T == EItemType::Medkit) return 3;
-				if (T == EItemType::Pistol || T == EItemType::Shotgun) return 2; 
-				if (T == EItemType::Medkit || T == EItemType::Food) return 1; 
+				if (T == EItemType::Pistol || T == EItemType::Shotgun) return 2;
+				if (T == EItemType::Medkit || T == EItemType::Food) return 1;
 				return 0;
 			};
 
@@ -349,7 +343,7 @@ APurgeZone* ASurvivorPawn::GetActivePurgeZoneDanger() const
 		if (!Zone) continue;
 
 		const float Remaining = Zone->GetTimeTillPurge() - Zone->GetTimePassed();
-		if (Remaining > DangerLead) continue; 
+		if (Remaining > DangerLead) continue;
 
 		const float Dist = FVector::Dist2D(MyLoc, Zone->GetActorLocation());
 		if (Dist < Zone->GetRadius() + 40.f && Dist < NearestDist)
@@ -374,7 +368,7 @@ void ASurvivorPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	
+	// Pin to ground so collisions can't lift us.
 	if (bGroundZSet)
 	{
 		FVector Loc = GetActorLocation();
@@ -385,141 +379,10 @@ void ASurvivorPawn::Tick(float DeltaTime)
 		}
 	}
 
-	
+	// Sight cone follows the controller's control rotation, so sync it to our facing.
 	if (AController* C = GetController())
 	{
 		C->SetControlRotation(GetActorRotation());
-	}
-
-	DrawDebug();
-}
-
-void ASurvivorPawn::DrawDebug() const
-{
-	if (!bDrawDebug || CVarSurvivorDebug.GetValueOnGameThread() == 0) return;
-	UWorld* World = GetWorld();
-	if (!World) return;
-
-	const FVector Loc = GetActorLocation();
-	const FVector Ground(Loc.X, Loc.Y, Loc.Z + 5.f);
-	const FVector PlaneY(1.f, 0.f, 0.f), PlaneZ(0.f, 1.f, 0.f); 
-
-	//Perception ranges 
-	const float SightR = SightConfig ? SightConfig->SightRadius : 1400.f;
-	const float LoseR  = SightConfig ? SightConfig->LoseSightRadius : 1900.f;
-	const float HearR  = HearingConfig ? HearingConfig->HearingRange : 1300.f;
-	const float HalfFOV = SightConfig ? SightConfig->PeripheralVisionAngleDegrees : 90.f;
-	const FVector Fwd = GetActorForwardVector().GetSafeNormal2D();
-
-	// Draw the sight cone wedge.
-	auto DrawSightCone = [&](float Radius, FColor Color, float Thickness)
-	{
-		const FVector EdgeL = Ground + Fwd.RotateAngleAxis(-HalfFOV, FVector::UpVector) * Radius;
-		const FVector EdgeR = Ground + Fwd.RotateAngleAxis(+HalfFOV, FVector::UpVector) * Radius;
-		DrawDebugLine(World, Ground, EdgeL, Color, false, -1.f, 0, Thickness);
-		DrawDebugLine(World, Ground, EdgeR, Color, false, -1.f, 0, Thickness);
-		const int32 Segs = 24;
-		FVector Prev = EdgeL;
-		for (int32 i = 1; i <= Segs; ++i)
-		{
-			const float Ang = -HalfFOV + (2.f * HalfFOV) * (static_cast<float>(i) / Segs);
-			const FVector P = Ground + Fwd.RotateAngleAxis(Ang, FVector::UpVector) * Radius;
-			DrawDebugLine(World, Prev, P, Color, false, -1.f, 0, Thickness);
-			Prev = P;
-		}
-	};
-	DrawSightCone(SightR, FColor(0, 220, 0), 3.f); // sight gain cone
-	DrawSightCone(LoseR,  FColor(0, 90, 0),  1.f); // sight lose cone
-	DrawDebugCircle(World, Ground, HearR, 48, FColor(220, 200, 0), false, -1.f, 0, 1.f, PlaneY, PlaneZ, false); // hearing circle
-
-	
-	DrawDebugLine(World, Ground, Ground + Fwd * 160.f, FColor::White, false, -1.f, 0, 3.f);
-
-	
-	for (const TWeakObjectPtr<AActor>& H : KnownHouses)
-	{
-		if (AHouse* House = Cast<AHouse>(H.Get()))
-		{
-			const FVector HL = House->GetActorLocation();
-			DrawDebugSphere(World, HL, 90.f, 12, FColor::Cyan, false, -1.f, 0, 2.f);
-			DrawDebugString(World, HL + FVector(0, 0, 130), House->GetHouseTypeString(), nullptr, FColor::Cyan, 0.f, true);
-		}
-	}
-
-
-	for (const TWeakObjectPtr<AActor>& Z : KnownPurgeZones)
-	{
-		if (AActor* PZ = Z.Get())
-			DrawDebugSphere(World, PZ->GetActorLocation(), 110.f, 12, FColor::Orange, false, -1.f, 0, 2.f);
-	}
-
-	
-	if (PerceptionComp)
-	{
-		TArray<AActor*> Perceived;
-		PerceptionComp->GetCurrentlyPerceivedActors(nullptr, Perceived);
-		for (AActor* A : Perceived)
-		{
-			if (Cast<ABaseZombie>(A))     DrawDebugSphere(World, A->GetActorLocation(), 60.f, 10, FColor::Red,   false, -1.f, 0, 2.f);
-			else if (Cast<ABaseItem>(A))  DrawDebugSphere(World, A->GetActorLocation(), 45.f, 8,  FColor::Green, false, -1.f, 0, 2.f);
-		}
-	}
-
-	
-	FString State = TEXT("EXPLORE");
-	if (ASurvivorAIController* AIC = Cast<ASurvivorAIController>(GetController()))
-	{
-		if (UBlackboardComponent* BB = AIC->GetBB())
-		{
-			AActor* Enemy = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
-			AActor* Item  = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
-			if (Enemy)
-			{
-				DrawDebugLine(World, Ground, Enemy->GetActorLocation(), FColor::Red, false, -1.f, 0, 2.f);
-				DrawDebugSphere(World, Enemy->GetActorLocation(), 75.f, 12, FColor::Red, false, -1.f, 0, 3.f);
-			}
-			if (Item)
-			{
-				DrawDebugLine(World, Ground, Item->GetActorLocation(), FColor::Green, false, -1.f, 0, 2.f);
-			}
-
-			const bool bHasW = BB->GetValueAsBool(FName("bHasWeapon"));
-			if (BB->GetValueAsBool(FName("bShouldFlee"))) State = TEXT("FLEE");
-			else if (Enemy && bHasW)                      State = TEXT("FIGHT");
-			else if (Item)                                State = TEXT("PICKUP");
-			else                                          State = TEXT("EXPLORE");
-		}
-	}
-
-	// On-screen status panel
-	if (GEngine)
-	{
-		const int32 HP = HealthComponent ? HealthComponent->GetHealth() : 0;
-		const int32 MaxHP = HealthComponent ? HealthComponent->GetMaxHealth() : 0;
-		const float StamPct = (StaminaComponent && StaminaComponent->GetMaxStamina() > 0.f)
-			? 100.f * StaminaComponent->GetCurrentStamina() / StaminaComponent->GetMaxStamina() : 0.f;
-
-		int32 Weapons = 0, Consumables = 0;
-		if (InventoryComponent)
-		{
-			for (ABaseItem* S : InventoryComponent->GetInventory())
-			{
-				if (!S) continue;
-				const EItemType T = S->GetItemType();
-				if (T == EItemType::Pistol || T == EItemType::Shotgun) ++Weapons;
-				else if (T == EItemType::Food || T == EItemType::Medkit) ++Consumables;
-			}
-		}
-
-		GEngine->AddOnScreenDebugMessage(101, 0.f, FColor::Yellow, FString::Printf(TEXT("STATE: %s"), *State));
-		GEngine->AddOnScreenDebugMessage(102, 0.f, FColor::White,
-			FString::Printf(TEXT("HP %d/%d   Stamina %.0f%%"), HP, MaxHP, StamPct));
-		GEngine->AddOnScreenDebugMessage(103, 0.f, FColor::White,
-			FString::Printf(TEXT("Bag: %d weapon(s), %d consumable(s)"), Weapons, Consumables));
-		GEngine->AddOnScreenDebugMessage(104, 0.f, FColor::Cyan,
-			FString::Printf(TEXT("Houses known: %d"), KnownHouses.Num()));
-		GEngine->AddOnScreenDebugMessage(105, 0.f, FColor::Silver,
-			TEXT("[green]=sight [yellow]=hearing  cyan=house  red=zombie  green=item"));
 	}
 }
 

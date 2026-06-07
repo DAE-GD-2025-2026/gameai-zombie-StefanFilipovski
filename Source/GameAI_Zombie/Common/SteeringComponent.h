@@ -85,9 +85,6 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Steering")
 	bool bFaceTravelDirection = false;
 
-	UPROPERTY(EditAnywhere, Category = "Steering|Debug")
-	bool bDrawDebug = false;
-
 private:
 	ESteeringMode Mode = ESteeringMode::Idle;
 	FVector TargetLocation = FVector::ZeroVector;

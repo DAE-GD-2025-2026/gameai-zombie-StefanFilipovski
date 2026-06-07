@@ -4,7 +4,6 @@
 #include "Perception/AIPerceptionComponent.h"
 #include "Zombies/BaseZombie.h"
 #include "Engine/World.h"
-#include "DrawDebugHelpers.h"
 
 USteeringComponent::USteeringComponent()
 {
@@ -103,10 +102,8 @@ FVector USteeringComponent::ObstacleAvoidance(const FVector& DesiredDir) const
 		const FVector End = Origin + Dir * Len;
 		if (GetWorld()->LineTraceSingleByChannel(Hit, Origin, End, ECC_WorldStatic, Params))
 		{
-			if (bDrawDebug) DrawDebugLine(GetWorld(), Origin, Hit.ImpactPoint, FColor::Red, false, 0.f, 0, 2.f);
 			return Hit.Distance;
 		}
-		if (bDrawDebug) DrawDebugLine(GetWorld(), Origin, End, FColor::Green, false, 0.f, 0, 1.f);
 		return Len;
 	};
 

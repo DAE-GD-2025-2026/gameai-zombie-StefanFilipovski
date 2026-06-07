@@ -108,11 +108,6 @@ protected:
 	// Zone we're committed to leaving, kept until clear.
 	mutable TWeakObjectPtr<AActor> LatchedPurgeZone;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	bool bDrawDebug{true};
-
-	void DrawDebug() const;
-
 public:
 	virtual void Tick(float DeltaTime) override;
 

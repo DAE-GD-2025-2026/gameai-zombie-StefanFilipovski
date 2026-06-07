@@ -141,7 +141,7 @@ void UBTTask_FightEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 	{
 		AIC->StopMovement();
 
-		// Fire on a steady cadence and stay locked on until the enemy is dead, flees, or we run dry.
+		// Fire and stay locked on until the enemy is dead, flees, or we run dry.
 		if (Memory->FireCooldown <= 0.f)
 		{
 			UInventoryComponent* Inventory = Survivor->GetInventoryComponent();
