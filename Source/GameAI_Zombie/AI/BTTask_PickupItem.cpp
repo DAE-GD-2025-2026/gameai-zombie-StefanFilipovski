@@ -25,6 +25,29 @@ namespace
 		return Count;
 	}
 
+	/** True if we currently hold ZERO of this consumable type (so it's worth making room for). */
+	bool IsConsumableNeeded(UInventoryComponent* Inv, EItemType Type)
+	{
+		if (Type != EItemType::Medkit && Type != EItemType::Food) return false;
+		for (ABaseItem* Item : Inv->GetInventory())
+			if (Item && Item->GetItemType() == Type) return false; // we already have one
+		return true;
+	}
+
+	/** Slot of the lowest-ammo weapon we can spare (keeps at least KeepAtLeast weapons), or -1. */
+	int32 FindWorstWeaponSlot(UInventoryComponent* Inv, int32 KeepAtLeast)
+	{
+		const TArray<ABaseItem*>& Items = Inv->GetInventory();
+		int32 WeaponCount = 0, WorstSlot = -1, WorstAmmo = INT_MAX;
+		for (int32 i = 0; i < Items.Num(); ++i)
+		{
+			if (!Items[i] || !IsWeaponType(Items[i]->GetItemType())) continue;
+			++WeaponCount;
+			if (Items[i]->GetValue() < WorstAmmo) { WorstAmmo = Items[i]->GetValue(); WorstSlot = i; }
+		}
+		return (WeaponCount > KeepAtLeast) ? WorstSlot : -1;
+	}
+
 	/** Find the slot index of the least valuable consumable, or -1 if none.
 	 *  Will not drop if we'd go below MinConsumables total consumables. */
 	int32 FindWorstConsumableSlot(UInventoryComponent* Inv, int32 MinConsumables = 0)
@@ -95,17 +118,19 @@ EBTNodeResult::Type UBTTask_PickupItem::ExecuteTask(UBehaviorTreeComponent& Owne
 
 	if (!bHasEmptySlot)
 	{
-		// Inventory full — but if the target is a weapon and we have < 3 weapons,
-		// drop worst consumable to make room. Keep at least 1 consumable.
-		if (IsWeaponType(TargetItem->GetItemType()) && CountWeapons(Inventory) < 3)
+		// Full: drop a spare consumable for a weapon, or a spare weapon for a medkit/food we lack.
+		const EItemType TT = TargetItem->GetItemType();
+		int32 DropSlot = -1;
+		if (IsWeaponType(TT))
+			DropSlot = FindWorstConsumableSlot(Inventory, 1);
+		else if (IsConsumableNeeded(Inventory, TT))
+			DropSlot = FindWorstWeaponSlot(Inventory, 2);
+
+		if (DropSlot >= 0)
 		{
-			const int32 DropSlot = FindWorstConsumableSlot(Inventory, 1); // keep at least 1 consumable
-			if (DropSlot >= 0)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("Pickup: Dropping consumable in slot %d to pick up weapon"), DropSlot);
-				Inventory->RemoveItem(DropSlot);
-				bHasEmptySlot = true;
-			}
+			UE_LOG(LogTemp, Warning, TEXT("Pickup: Dropping slot %d to make room for item type %d"), DropSlot, static_cast<int>(TT));
+			Inventory->RemoveItem(DropSlot);
+			bHasEmptySlot = true;
 		}
 		if (!bHasEmptySlot)
 		{
@@ -114,16 +139,9 @@ EBTNodeResult::Type UBTTask_PickupItem::ExecuteTask(UBehaviorTreeComponent& Owne
 		}
 	}
 
-	// Approach the item with Arrive steering (smooth decelerating approach, no overshoot).
-	// Avoidance stays off so we don't get deflected away from items inside tight rooms;
-	// the timeout below bounds the cost if an item is unreachable.
-	AIC->StopMovement(); // clear any leftover path-following request from Explore/Fight
-	if (USteeringComponent* Steering = Survivor->GetSteeringComponent())
-	{
-		Steering->SetObstacleAvoidanceEnabled(false);
-		Steering->SetSeparationEnabled(false);
-		Steering->ArriveAt(TargetItem->GetActorLocation());
-	}
+	// Approach via the navmesh so we route around walls rather than driving into them.
+	if (USteeringComponent* Steering = Survivor->GetSteeringComponent()) Steering->Stop();
+	AIC->MoveToLocation(TargetItem->GetActorLocation(), FMath::Max(Inventory->GetPickupRange() - 10.f, 40.f));
 
 	return EBTNodeResult::InProgress;
 }
@@ -169,18 +187,37 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 		return;
 	}
 
-	// Keep steering toward the item each frame.
-	if (USteeringComponent* Steering = Survivor->GetSteeringComponent())
-	{
-		Steering->ArriveAt(TargetItem->GetActorLocation());
-	}
-
 	const float Dist = FVector::Dist(Survivor->GetActorLocation(), TargetItem->GetActorLocation());
 	const float PickupRange = Inventory->GetPickupRange();
 
-	if (Dist <= PickupRange + 20.f)
+	USteeringComponent* Steering = Survivor->GetSteeringComponent();
+
+	// Not in range: far → navmesh around walls; close → precise steering (navmesh can stall short of the item).
+	if (Dist > PickupRange + 20.f)
 	{
-		if (USteeringComponent* Steering = Survivor->GetSteeringComponent()) Steering->Stop();
+		if (Dist > 250.f)
+		{
+			if (Steering) Steering->Stop();
+			if (AIC->GetMoveStatus() != EPathFollowingStatus::Moving)
+				AIC->MoveToLocation(TargetItem->GetActorLocation(), 100.f);
+		}
+		else
+		{
+			AIC->StopMovement();
+			if (Steering)
+			{
+				Steering->SetObstacleAvoidanceEnabled(false);
+				Steering->SetSeparationEnabled(false);
+				Steering->ArriveAt(TargetItem->GetActorLocation());
+			}
+		}
+		return;
+	}
+
+	// In pickup range — grab.
+	{
+		AIC->StopMovement();
+		if (Steering) Steering->Stop();
 
 		// Grab the target item first
 		const TArray<ABaseItem*>& Items = Inventory->GetInventory();
@@ -197,8 +234,7 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 			}
 		}
 
-		// Also grab other nearby items while we're here — but ONLY ones we've actually
-		// perceived (no world-omniscient queries; keeps us compliant with AIPerception).
+		// Also grab other nearby items we've perceived (perception only, no world query).
 		TArray<AActor*> PerceivedActors;
 		if (Survivor->GetPerceptionComponent())
 		{
@@ -240,13 +276,18 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 				if (CurrentItems[i] == nullptr) { EmptySlot = i; break; }
 			}
 
-			// No empty slot — if item is a weapon and we have < 3, drop a consumable (keep at least 1)
-			if (EmptySlot < 0 && IsWeaponType(NearbyItem->GetItemType()) && CountWeapons(Inventory) < 3)
+			// No empty slot: drop a spare consumable for a weapon, or a spare weapon for a needed medkit/food.
+			if (EmptySlot < 0)
 			{
-				const int32 DropSlot = FindWorstConsumableSlot(Inventory, 1);
+				const EItemType NT = NearbyItem->GetItemType();
+				int32 DropSlot = -1;
+				if (IsWeaponType(NT))
+					DropSlot = FindWorstConsumableSlot(Inventory, 1);
+				else if (IsConsumableNeeded(Inventory, NT))
+					DropSlot = FindWorstWeaponSlot(Inventory, 2);
 				if (DropSlot >= 0)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("Pickup: Dropping consumable in slot %d for nearby weapon"), DropSlot);
+					UE_LOG(LogTemp, Warning, TEXT("Pickup: Dropping slot %d for nearby item type %d"), DropSlot, static_cast<int>(NT));
 					Inventory->RemoveItem(DropSlot);
 					EmptySlot = DropSlot;
 				}

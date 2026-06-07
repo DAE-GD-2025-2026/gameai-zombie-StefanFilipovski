@@ -8,6 +8,8 @@
 #include "Common/InventoryComponent.h"
 #include "Items/BaseItem.h"
 #include "Items/ItemType.h"
+#include "Zombies/BaseZombie.h"
+#include "Perception/AIPerceptionComponent.h"
 
 UBTTask_Explore::UBTTask_Explore()
 {
@@ -61,10 +63,11 @@ bool UBTTask_Explore::IsHouseOnCooldown(AHouse* House) const
 	return Until && GetWorld()->GetTimeSeconds() < *Until;
 }
 
-void UBTTask_Explore::CooldownHouse(AHouse* House)
+void UBTTask_Explore::CooldownHouse(AHouse* House, float Seconds)
 {
 	if (!House || !GetWorld()) return;
-	HouseCooldownUntil.Add(House, GetWorld()->GetTimeSeconds() + HouseRevisitCooldown);
+	const float Dur = (Seconds > 0.f) ? Seconds : HouseRevisitCooldown;
+	HouseCooldownUntil.Add(House, GetWorld()->GetTimeSeconds() + Dur);
 }
 
 AHouse* UBTTask_Explore::PickTargetHouse(ASurvivorPawn* Survivor, const FVector& From, bool bThreat, const FVector& ThreatLoc) const
@@ -84,6 +87,25 @@ AHouse* UBTTask_Explore::PickTargetHouse(ASurvivorPawn* Survivor, const FVector&
 	return Best;
 }
 
+bool UBTTask_Explore::NearestPerceivedEnemy(ASurvivorPawn* Survivor, FVector& OutLoc, float& OutDist) const
+{
+	if (!Survivor || !Survivor->GetPerceptionComponent()) return false;
+	TArray<AActor*> Perceived;
+	Survivor->GetPerceptionComponent()->GetCurrentlyPerceivedActors(nullptr, Perceived);
+
+	const FVector MyLoc = Survivor->GetActorLocation();
+	float Best = MAX_FLT;
+	bool bFound = false;
+	for (AActor* A : Perceived)
+	{
+		if (!Cast<ABaseZombie>(A)) continue;
+		const float D = FVector::Dist2D(MyLoc, A->GetActorLocation());
+		if (D < Best) { Best = D; OutLoc = A->GetActorLocation(); bFound = true; }
+	}
+	OutDist = Best;
+	return bFound;
+}
+
 void UBTTask_Explore::IssueMove(AAIController* AIC, const FVector& Goal, float Accept)
 {
 	const bool bMoving = AIC->GetMoveStatus() == EPathFollowingStatus::Moving;
@@ -99,7 +121,13 @@ void UBTTask_Explore::SetActiveHouse(ASurvivorPawn* Survivor, AHouse* House, con
 {
 	ActiveHouse = House;
 	const FHouseBounds B = House->GetBounds();
-	InteriorTarget = FVector(B.Origin.X, B.Origin.Y, Origin.Z);
+	const FVector Center(B.Origin.X, B.Origin.Y, Origin.Z);
+	// Aim a bit past the centre, deeper along the approach direction (helps long rectangle houses). Clamped.
+	const FVector Dir = FVector(Center.X - Origin.X, Center.Y - Origin.Y, 0.f).GetSafeNormal2D();
+	FVector Deep = Center + Dir * 300.f;
+	Deep.X = FMath::Clamp(Deep.X, B.Origin.X - B.Extent.X * 0.7f, B.Origin.X + B.Extent.X * 0.7f);
+	Deep.Y = FMath::Clamp(Deep.Y, B.Origin.Y - B.Extent.Y * 0.7f, B.Origin.Y + B.Extent.Y * 0.7f);
+	InteriorTarget = Deep;
 	CurrentGoal = InteriorTarget;
 	CornerTry = -1;
 	StuckTimer = 0.f;
@@ -107,6 +135,7 @@ void UBTTask_Explore::SetActiveHouse(ASurvivorPawn* Survivor, AHouse* House, con
 	DwellTimer = 0.f;
 	InsideTimer = 0.f;
 	bStoppedInside = false;
+	bSawItemThisVisit = false;
 	bLastIssuedValid = false; // force a fresh move toward the new target
 
 	UE_LOG(LogTemp, Log, TEXT("Explore: heading into a %s house (dist %.0f, %d known)"),
@@ -133,6 +162,11 @@ void UBTTask_Explore::ResetState()
 	VentureStartIdle = -1.f;
 	bAvoiding = false;
 	AvoidReissueTimer = 0.f;
+	bBumpAvoiding = false;
+	BumpReissueTimer = 0.f;
+	bScanHolding = false;
+	ScanHoldUntil = 0.f;
+	ScanTargetYaw = 0.f;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -181,17 +215,38 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 	const float Now = World->GetTimeSeconds();
 	const FVector Origin = Survivor->GetActorLocation();
 
+	// Look-around scan: step the facing through sectors and dwell on each so the throttled sight sense can
+	// sample that direction (a fast continuous spin aliases and misses things). Movement is unaffected.
+	{
+		const float SectorStep = 72.f;   // 5 sectors cover 360°
+		const float HoldTime    = 0.5f;  // dwell per sector
+		const float TurnRate    = 540.f;
+		FRotator R = Survivor->GetActorRotation();
+		if (bScanHolding && Now >= ScanHoldUntil)
+		{
+			ScanTargetYaw = FMath::UnwindDegrees(ScanTargetYaw + SectorStep);
+			bScanHolding = false;
+		}
+		if (!bScanHolding)
+		{
+			R.Yaw = FMath::FixedTurn(R.Yaw, ScanTargetYaw, TurnRate * Dt);
+			Survivor->SetActorRotation(R);
+			if (FMath::Abs(FMath::FindDeltaAngleDegrees(R.Yaw, ScanTargetYaw)) < 3.f)
+			{
+				bScanHolding = true;
+				ScanHoldUntil = Now + HoldTime;
+			}
+		}
+	}
+
 	FVector ThreatLoc;
 	const bool bThreat = GetThreatLocation(OwnerComp, ThreatLoc);
 
-	// Sprint when an enemy is near so pursuing our goal (a house/weapon) stays EVASIVE — we keep
-	// distance instead of letting the zombie chew on us while we walk. Otherwise move at normal pace.
+	// Sprint when an enemy is near so goal-seeking stays evasive.
 	if (bThreat && FVector::Dist2D(Origin, ThreatLoc) < 900.f) Survivor->StartRunning();
 	else Survivor->StopRunning();
 
-	// 1) Looting: walk into the ROOM (near the centre) before looting — not just touch the doorway.
-	// For a long house (e.g. Rectangle) the entrance corner is far from the centre, and the walls block
-	// line-of-sight to the loot from the door; stopping at the door = "looting" an empty-looking house.
+	// 1) Looting: walk to the room centre before looting (walls block line-of-sight to loot from the door).
 	if (AHouse* Active = Cast<AHouse>(ActiveHouse.Get()))
 	{
 		const float DistCenter = FVector::Dist2D(Origin, InteriorTarget);
@@ -204,24 +259,42 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 		{
 			if (!bStoppedInside) { AIC->StopMovement(); bStoppedInside = true; }
 
-			// Sweep our view around the room so we perceive (and Pickup grabs) EVERY item, not just the
-			// ones in our current facing cone. Otherwise two items side-by-side get split: we grab one,
-			// face away from the other, and leave it behind until we luck into facing it later.
+			// Sweep our view around the room so we perceive every item, not just those in the facing cone.
 			FRotator R = Survivor->GetActorRotation();
 			R.Yaw += 220.f * Dt;
 			Survivor->SetActorRotation(R);
 
-			// Keep clearing while anything is still grabbable (Pickup preempts us to take it). Only count
-			// toward "looted" once a full sweep turns up nothing left to grab.
+			// Keep clearing while anything is grabbable; count as looted only once a sweep finds nothing.
 			UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 			const bool bItemToGrab = BB && BB->GetValueAsObject(FName("TargetItem")) != nullptr;
-			if (bItemToGrab) DwellTimer = 0.f;
+			if (bItemToGrab) { DwellTimer = 0.f; bSawItemThisVisit = true; }
 			else             DwellTimer += Dt;
 
 			if (DwellTimer >= DwellInsideSeconds)
 			{
-				CooldownHouse(Active);
-				UE_LOG(LogTemp, Log, TEXT("Explore: looted a %s house — moving on"), *Active->GetHouseTypeString());
+				if (bSawItemThisVisit)
+				{
+					CooldownHouse(Active);
+					UE_LOG(LogTemp, Log, TEXT("Explore: looted a %s house — moving on"), *Active->GetHouseTypeString());
+				}
+				else
+				{
+					// Picked-clean only if we had room to take something; a full bag gets the short cooldown.
+					bool bHadRoom = false;
+					if (UInventoryComponent* Inv = Survivor->GetInventoryComponent())
+						for (ABaseItem* S : Inv->GetInventory()) if (!S) { bHadRoom = true; break; }
+
+					if (bHadRoom)
+					{
+						CooldownHouse(Active, ExhaustedCooldown);
+						UE_LOG(LogTemp, Log, TEXT("Explore: %s house was empty — picked-clean, moving on"), *Active->GetHouseTypeString());
+					}
+					else
+					{
+						CooldownHouse(Active);
+						UE_LOG(LogTemp, Log, TEXT("Explore: bag full at a %s house — will revisit"), *Active->GetHouseTypeString());
+					}
+				}
 				ClearActive();
 			}
 			return;
@@ -265,6 +338,27 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 		}
 	}
 
+	// 2.5) Bump-avoidance: if a perceived zombie is right next to us, step away before resuming.
+	{
+		FVector EnemyLoc; float EnemyDist;
+		if (NearestPerceivedEnemy(Survivor, EnemyLoc, EnemyDist) && EnemyDist < EnemyBumpRadius)
+		{
+			BumpReissueTimer += Dt;
+			if (!bBumpAvoiding || BumpReissueTimer >= 0.5f)
+			{
+				FVector Away = (Origin - EnemyLoc).GetSafeNormal2D();
+				if (Away.IsNearlyZero()) Away = Survivor->GetActorForwardVector().GetSafeNormal2D();
+				if (USteeringComponent* S = Survivor->GetSteeringComponent()) S->Stop();
+				AIC->MoveToLocation(Origin + Away * 700.f, 80.f);
+				bLastIssuedValid = false;
+				bBumpAvoiding = true;
+				BumpReissueTimer = 0.f;
+			}
+			return;
+		}
+		bBumpAvoiding = false;
+	}
+
 	// 3) Choose / continue toward a house.
 	AHouse* Target = nullptr;
 	if (AHouse* A = Cast<AHouse>(ActiveHouse.Get()))
@@ -274,8 +368,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 	}
 	if (!Target) Target = PickTargetHouse(Survivor, Origin, bThreat, ThreatLoc);
 
-	// While venturing, stay committed until we discover a NEW house (or arrive / time out), so a home
-	// house coming off cooldown doesn't keep yanking us back to the same exhausted cluster.
+	// While venturing, stay committed until we discover a new house (or arrive / time out).
 	if (bVenturing)
 	{
 		const bool bArrived = FVector::Dist2D(Origin, VentureTarget) < 300.f;
@@ -294,10 +387,10 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 
 	if (Target)
 	{
-		VentureStartIdle = -1.f; // we have a job to do
+		VentureStartIdle = -1.f;
 		if (Target != ActiveHouse.Get()) SetActiveHouse(Survivor, Target, Origin);
 
-		// Stuck / blocked → try the corner doorways in turn (every house type's openings are at corners).
+		// Stuck / blocked → try the corner doorways in turn.
 		StuckTimer += Dt;
 		const bool bStopped = AIC->GetMoveStatus() != EPathFollowingStatus::Moving;
 		if (StuckTimer >= 3.f || bStopped)
@@ -312,7 +405,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 					CurrentGoal = Corners[CornerTry];
 					CurrentGoal.Z = Origin.Z;
 					bLastIssuedValid = false;
-					UE_LOG(LogTemp, Log, TEXT("Explore: trying corner doorway %d/4"), CornerTry + 1);
+					UE_LOG(LogTemp, Log, TEXT("Explore: trying doorway %d/4"), CornerTry + 1);
 				}
 				else
 				{

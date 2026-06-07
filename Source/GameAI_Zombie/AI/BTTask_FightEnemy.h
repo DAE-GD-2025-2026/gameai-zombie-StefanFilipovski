@@ -7,6 +7,7 @@
 struct FBTFightMemory
 {
 	float TimeElapsed = 0.f;
+	float FireCooldown = 0.f;  // time until next allowed shot
 };
 
 /**
@@ -32,4 +33,8 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Fight")
 	float TimeoutSeconds = 8.f;
+
+	// Seconds between shots while locked on.
+	UPROPERTY(EditAnywhere, Category = "Fight")
+	float FireInterval = 0.4f;
 };

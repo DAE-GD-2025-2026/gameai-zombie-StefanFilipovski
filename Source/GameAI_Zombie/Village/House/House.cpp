@@ -4,6 +4,7 @@
 #include "House.h"
 #include "Perception/AIPerceptionStimuliSourceComponent.h"
 #include "Perception/AISense_Sight.h"
+#include "Engine/World.h"
 
 
 // Sets default values
@@ -41,6 +42,52 @@ FHouseBounds AHouse::GetBounds() const
 	return {Origin, Extent};
 }
 
+UAISense_Sight::EVisibilityResult AHouse::CanBeSeenFrom(
+	const FCanBeSeenFromContext& Context,
+	FVector& OutSeenLocation,
+	int32& OutNumberOfLoSChecksPerformed,
+	int32& OutNumberOfAsyncLosCheckRequested,
+	float& OutSightStrength,
+	int32* /*UserData*/,
+	const FOnPendingVisibilityQueryProcessedDelegate* /*Delegate*/)
+{
+	OutNumberOfAsyncLosCheckRequested = 0;
+	OutNumberOfLoSChecksPerformed = 0;
+	OutSightStrength = 0.f;
+
+	UWorld* World = GetWorld();
+	if (!World) return UAISense_Sight::EVisibilityResult::NotVisible;
+
+	// Test the four outer corners plus the centre; seen if any has line-of-sight.
+	const FHouseBounds B = GetBounds();
+	const float Z = B.Origin.Z + 80.f;
+	const FVector Pts[5] = {
+		FVector(B.Origin.X + B.Extent.X, B.Origin.Y + B.Extent.Y, Z),
+		FVector(B.Origin.X + B.Extent.X, B.Origin.Y - B.Extent.Y, Z),
+		FVector(B.Origin.X - B.Extent.X, B.Origin.Y + B.Extent.Y, Z),
+		FVector(B.Origin.X - B.Extent.X, B.Origin.Y - B.Extent.Y, Z),
+		FVector(B.Origin.X, B.Origin.Y, Z)
+	};
+
+	FCollisionQueryParams Params(FName(TEXT("AIHouseSight")), false);
+	Params.AddIgnoredActor(this);
+	if (Context.IgnoreActor) Params.AddIgnoredActor(Context.IgnoreActor);
+
+	for (const FVector& P : Pts)
+	{
+		++OutNumberOfLoSChecksPerformed;
+		FHitResult Hit;
+		const bool bBlocked = World->LineTraceSingleByChannel(Hit, Context.ObserverLocation, P, ECC_Visibility, Params);
+		if (!bBlocked)
+		{
+			OutSeenLocation = P;
+			OutSightStrength = 1.f;
+			return UAISense_Sight::EVisibilityResult::Visible;
+		}
+	}
+	return UAISense_Sight::EVisibilityResult::NotVisible;
+}
+
 EHouseType AHouse::GetHouseType() const
 {
 	// Blueprint instances report a class name like "BP_HouseA_C" — match the variant suffix. Check the
@@ -74,6 +121,18 @@ void AHouse::GetCornerOpenings(FVector OutCorners[4], float Inset) const
 	const float SX = FMath::Max(B.Extent.X - IX, 0.f);
 	const float SY = FMath::Max(B.Extent.Y - IY, 0.f);
 
+	if (GetHouseType() == EHouseType::OpenCorners)
+	{
+		// House_C: the corners are walled and each SIDE has an opening. Aim at the four wall-midpoints
+		// (pulled inward) so we pass through a side doorway rather than into a blocked corner.
+		OutCorners[0] = B.Origin + FVector(+SX, 0.f, 0.f);
+		OutCorners[1] = B.Origin + FVector(-SX, 0.f, 0.f);
+		OutCorners[2] = B.Origin + FVector(0.f, +SY, 0.f);
+		OutCorners[3] = B.Origin + FVector(0.f, -SY, 0.f);
+		return;
+	}
+
+	// House / HouseA / HouseB: the opening(s) sit at the corners.
 	OutCorners[0] = B.Origin + FVector(+SX, +SY, 0.f);
 	OutCorners[1] = B.Origin + FVector(+SX, -SY, 0.f);
 	OutCorners[2] = B.Origin + FVector(-SX, +SY, 0.f);

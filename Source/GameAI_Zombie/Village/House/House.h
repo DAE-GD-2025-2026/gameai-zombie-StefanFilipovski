@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Perception/AISightTargetInterface.h"
 #include "House.generated.h"
 
 class UAIPerceptionStimuliSourceComponent;
@@ -30,13 +31,23 @@ enum class EHouseType : uint8
 };
 
 UCLASS()
-class GAMEAI_ZOMBIE_API AHouse : public AActor
+class GAMEAI_ZOMBIE_API AHouse : public AActor, public IAISightTargetInterface
 {
 	GENERATED_BODY()
 
 public:
 	// Sets default values for this actor's properties
 	AHouse();
+
+	/** Sight visibility test: house is seen when any outer corner has line-of-sight, not just the centre. */
+	virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(
+		const FCanBeSeenFromContext& Context,
+		FVector& OutSeenLocation,
+		int32& OutNumberOfLoSChecksPerformed,
+		int32& OutNumberOfAsyncLosCheckRequested,
+		float& OutSightStrength,
+		int32* UserData = nullptr,
+		const FOnPendingVisibilityQueryProcessedDelegate* Delegate = nullptr) override;
 
 protected:
 	// Called when the game starts or when spawned

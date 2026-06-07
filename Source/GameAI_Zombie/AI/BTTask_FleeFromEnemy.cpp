@@ -10,6 +10,9 @@
 #include "Items/BaseItem.h"
 #include "Items/ItemType.h"
 #include "PurgeZones/PurgeZone.h"
+#include "NavigationSystem.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Zombies/BaseZombie.h"
 
 UBTTask_FleeFromEnemy::UBTTask_FleeFromEnemy()
 {
@@ -17,7 +20,7 @@ UBTTask_FleeFromEnemy::UBTTask_FleeFromEnemy()
 	bNotifyTick = true;
 }
 
-// The point we run away from: the live enemy, or its last known location (both from AIPerception).
+// The point to run from: the live enemy, or its last known location.
 static FVector GetThreatLocation(UBlackboardComponent* BB, const FVector& Fallback)
 {
 	if (AActor* Enemy = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy"))))
@@ -28,48 +31,32 @@ static FVector GetThreatLocation(UBlackboardComponent* BB, const FVector& Fallba
 	return LastKnown.IsZero() ? Fallback : LastKnown;
 }
 
-// Decide which way to run. Normally straight away from the threat, but if we've fled far outside
-// our explored region (the centroid of remembered houses), we add a sideways component that curves
-// back toward that region. This makes the agent KITE/ORBIT around the horde and stay inside the
-// playable map, instead of beelining in a dead-straight line off the level edge.
-static FVector ComputeFleeDir(ASurvivorPawn* Survivor, const FVector& MyLoc, const FVector& ThreatLoc)
+// Project a point onto the navmesh; true only if a reachable point lies near the request (rejects off-map).
+static bool ProjectFleePoint(UWorld* World, const FVector& In, FVector& Out)
 {
-	FVector Away = (MyLoc - ThreatLoc).GetSafeNormal2D();
-	if (Away.IsNearlyZero()) Away = Survivor->GetActorForwardVector().GetSafeNormal2D();
-
-	// Centroid of remembered houses = the part of the map we know and where loot respawns.
-	FVector Home = FVector::ZeroVector;
-	int32 Count = 0;
-	for (const TWeakObjectPtr<AActor>& H : Survivor->GetKnownHouses())
+	UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!Nav) { Out = In; return true; }
+	FNavLocation Loc;
+	if (Nav->ProjectPointToNavigation(In, Loc, FVector(400.f, 400.f, 600.f)))
 	{
-		if (H.IsValid()) { Home += H->GetActorLocation(); ++Count; }
+		Out = Loc.Location;
+		return FVector::Dist2D(In, Out) < 350.f;
 	}
-	if (Count > 0) Home /= Count;
-
-	const FVector ToHome = Home - MyLoc;
-	if (Count > 0 && ToHome.Size2D() > 2000.f)
-	{
-		// Turn perpendicular to "away", toward home, so our path arcs back into the map.
-		FVector Perp = FVector::CrossProduct(FVector::UpVector, Away).GetSafeNormal2D();
-		if ((Perp | ToHome.GetSafeNormal2D()) < 0.f) Perp = -Perp;
-		const FVector Dir = (Away + Perp * 0.7f).GetSafeNormal2D();
-		// Only accept the curve if it's still generally away from the threat (never turn into it).
-		if (!Dir.IsNearlyZero() && (Dir | Away) > 0.f) return Dir;
-	}
-	return Away;
+	return false;
 }
 
-// Where to flee TO. Prefer a remembered house that lies AWAY from the threat — fleeing toward a
-// refuge means that once we shake the enemy we're standing in a house we can loot to re-arm/heal,
-// instead of running into empty map until we die. Falls back to a kiting point straight away when
-// no safe house fits (e.g. the only houses are back through the horde).
+// Where to flee to: a reachable known house away from the threat, else the best in-bounds navmesh point
+// from a fan of directions (farthest from threat, tie-broken toward the explored region).
 static FVector ComputeFleeTarget(ASurvivorPawn* Survivor, const FVector& MyLoc, const FVector& ThreatLoc, bool& bOutToHouse)
 {
 	bOutToHouse = false;
-	const FVector Away = (MyLoc - ThreatLoc).GetSafeNormal2D();
+	UWorld* World = Survivor->GetWorld();
+	FVector Away = (MyLoc - ThreatLoc).GetSafeNormal2D();
+	if (Away.IsNearlyZero()) Away = Survivor->GetActorForwardVector().GetSafeNormal2D();
 
+	// Prefer a remembered house that lies away from the threat AND is reachable on the navmesh.
 	AActor* BestHouse = nullptr;
-	float BestDist = MAX_FLT;
+	float BestHouseDist = MAX_FLT;
 	for (const TWeakObjectPtr<AActor>& H : Survivor->GetKnownHouses())
 	{
 		if (!H.IsValid()) continue;
@@ -77,19 +64,43 @@ static FVector ComputeFleeTarget(ASurvivorPawn* Survivor, const FVector& MyLoc, 
 		const FVector ToHouse = HouseLoc - MyLoc;
 		const float Dist = ToHouse.Size2D();
 		if (Dist < 100.f) continue;
-		// Must be generally away from the threat (don't route us toward or past the enemy)...
-		if (!Away.IsNearlyZero() && (ToHouse.GetSafeNormal2D() | Away) < 0.2f) continue;
-		// ...and not sitting right on top of the threat.
-		if (FVector::Dist2D(HouseLoc, ThreatLoc) < 700.f) continue;
-		if (Dist < BestDist) { BestDist = Dist; BestHouse = H.Get(); }
+		if (!Away.IsNearlyZero() && (ToHouse.GetSafeNormal2D() | Away) < 0.2f) continue; // must be away from threat
+		if (FVector::Dist2D(HouseLoc, ThreatLoc) < 700.f) continue;                       // and not on the threat
+		if (Dist < BestHouseDist) { BestHouseDist = Dist; BestHouse = H.Get(); }
 	}
-
 	if (BestHouse)
 	{
-		bOutToHouse = true;
-		return BestHouse->GetActorLocation();
+		FVector NavPt;
+		if (ProjectFleePoint(World, BestHouse->GetActorLocation(), NavPt))
+		{
+			bOutToHouse = true;
+			return NavPt;
+		}
 	}
-	return MyLoc + ComputeFleeDir(Survivor, MyLoc, ThreatLoc) * 800.f;
+
+	// Centroid of known houses = the explored region; bias the fan toward it.
+	FVector Home = FVector::ZeroVector;
+	int32 Count = 0;
+	for (const TWeakObjectPtr<AActor>& H : Survivor->GetKnownHouses())
+		if (H.IsValid()) { Home += H->GetActorLocation(); ++Count; }
+	const bool bHaveHome = Count > 0;
+	if (bHaveHome) Home /= Count;
+	const FVector ToHomeDir = bHaveHome ? (Home - MyLoc).GetSafeNormal2D() : FVector::ZeroVector;
+
+	// Fan directions out from straight-away; keep the best in-bounds, navmesh-valid one.
+	static const float Angles[] = { 0.f, 25.f, -25.f, 50.f, -50.f, 80.f, -80.f, 110.f, -110.f };
+	FVector BestTarget = MyLoc + Away * 300.f;
+	float BestScore = -MAX_FLT;
+	for (float Ang : Angles)
+	{
+		const FVector Dir = Away.RotateAngleAxis(Ang, FVector::UpVector);
+		FVector NavPt;
+		if (!ProjectFleePoint(World, MyLoc + Dir * 900.f, NavPt)) continue;
+		float Score = FVector::Dist2D(NavPt, ThreatLoc);
+		if (bHaveHome) Score += (Dir | ToHomeDir) * 400.f;
+		if (Score > BestScore) { BestScore = Score; BestTarget = NavPt; }
+	}
+	return BestTarget;
 }
 
 // A point just outside the purge zone's blast radius, directly away from its centre.
@@ -98,8 +109,8 @@ static FVector PurgeEscapeTarget(ASurvivorPawn* Survivor, const FVector& MyLoc, 
 	const FVector Centre = Zone->GetActorLocation();
 	FVector Out = (MyLoc - Centre).GetSafeNormal2D();
 	if (Out.IsNearlyZero()) Out = Survivor->GetActorForwardVector().GetSafeNormal2D();
-	// Aim past the latch-release distance (radius+250) so we actually clear the zone and stop fleeing.
-	return Centre + Out * (Zone->GetRadius() + 350.f);
+	// Just step clear of the blast radius.
+	return Centre + Out * (Zone->GetRadius() + 150.f);
 }
 
 EBTNodeResult::Type UBTTask_FleeFromEnemy::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
@@ -107,6 +118,9 @@ EBTNodeResult::Type UBTTask_FleeFromEnemy::ExecuteTask(UBehaviorTreeComponent& O
 	FBTFleeMemory* Memory = reinterpret_cast<FBTFleeMemory*>(NodeMemory);
 	Memory->TimeElapsed = 0.f;
 	Memory->bInitialized = false;
+	Memory->CommitUntil = 0.f;
+	Memory->CommitTarget = FVector::ZeroVector;
+	Memory->StuckCount = 0;
 
 	AAIController* AIC = OwnerComp.GetAIOwner();
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
@@ -115,14 +129,13 @@ EBTNodeResult::Type UBTTask_FleeFromEnemy::ExecuteTask(UBehaviorTreeComponent& O
 	ASurvivorPawn* Survivor = Cast<ASurvivorPawn>(AIC->GetPawn());
 	if (!Survivor) return EBTNodeResult::Failed;
 
-	// Commit to sprinting and run straight away from the threat. Steering is stopped so it
-	// doesn't fight the path-following.
+	// Sprint, and stop steering so it doesn't fight path-following.
 	Survivor->StartRunning();
 	if (Survivor->GetSteeringComponent()) Survivor->GetSteeringComponent()->Stop();
 
 	const FVector MyLoc = Survivor->GetActorLocation();
 
-	// Lethal purge zone takes precedence over everything: sprint straight out of the blast radius.
+	// Purge zone takes precedence: sprint out of the blast radius.
 	if (APurgeZone* Zone = Survivor->GetActivePurgeZoneDanger())
 	{
 		AIC->MoveToLocation(PurgeEscapeTarget(Survivor, MyLoc, Zone), 50.f);
@@ -161,15 +174,12 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		return;
 	}
 
-	// Keep sprinting the whole time (StaminaComponent auto-stops at 0, so this uses all of it).
 	Survivor->StartRunning();
 
-	// Consume items WHILE fleeing (instant use, no need to stop). Flee outranks the Heal/Food
-	// branches, so without this we'd die mid-escape holding a medkit, or run out of stamina with
-	// food in the bag and get caught.
+	// Use items while fleeing (instant, no stopping), since Flee outranks the Heal/Food branches.
 	UInventoryComponent* Inv = Survivor->GetInventoryComponent();
 
-	// Heal if hurt and we have a medkit.
+	// Heal if hurt.
 	if (UHealthComponent* Health = Survivor->GetHealthComponent())
 	{
 		const float HpPct = (Health->GetMaxHealth() > 0)
@@ -191,7 +201,7 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		}
 	}
 
-	// Refuel stamina with food if low, so we can keep sprinting away.
+	// Eat food if stamina is low.
 	if (UStaminaComponent* Stamina = Survivor->GetStaminaComponent())
 	{
 		const float StamPct = (Stamina->GetMaxStamina() > 0.f)
@@ -215,28 +225,36 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 
 	const FVector MyLoc = Survivor->GetActorLocation();
 
-	// Lethal purge zone overrides the enemy-flee logic: keep sprinting out of the blast radius.
+	// Purge zone overrides: keep sprinting out of the blast radius.
 	if (APurgeZone* Zone = Survivor->GetActivePurgeZoneDanger())
 	{
 		AIC->MoveToLocation(PurgeEscapeTarget(Survivor, MyLoc, Zone), 50.f);
 		return;
 	}
 
-	// Escaped far enough? Stop fleeing.
-	if (AActor* Enemy = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy"))))
+	// Escaped only when no perceived zombie is still close (checking just TargetEnemy caused stop/restart jitter).
 	{
-		if (FVector::Dist(MyLoc, Enemy->GetActorLocation()) > 1200.f)
+		float NearestZombie = MAX_FLT;
+		if (UAIPerceptionComponent* Perc = Survivor->GetPerceptionComponent())
+		{
+			TArray<AActor*> Perceived;
+			Perc->GetCurrentlyPerceivedActors(nullptr, Perceived);
+			for (AActor* A : Perceived)
+				if (Cast<ABaseZombie>(A))
+					NearestZombie = FMath::Min(NearestZombie, FVector::Dist(MyLoc, A->GetActorLocation()));
+		}
+		if (NearestZombie > 1200.f)
 		{
 			AIC->StopMovement();
 			Survivor->StopRunning();
 			BB->ClearValue(FName("TargetEnemy"));
-			UE_LOG(LogTemp, Log, TEXT("Flee: escaped enemy, stopping"));
+			UE_LOG(LogTemp, Log, TEXT("Flee: escaped — no zombie nearby, stopping"));
 			FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 			return;
 		}
 	}
 
-	// Periodically hand control back so the BT can re-decide (e.g. we found a weapon, or HP changed).
+	// Periodically hand control back so the BT can re-decide.
 	if (Memory->TimeElapsed >= TimeoutSeconds)
 	{
 		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -249,8 +267,14 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 	bool bToHouse = false;
 	const FVector FleeTarget = ComputeFleeTarget(Survivor, MyLoc, ThreatLoc, bToHouse);
 
-	// Stuck against a wall? Sidestep — but always to a direction that's still AWAY from the enemy,
-	// never back toward it. Otherwise keep committing straight away.
+	// While committed to a break-out escape, keep heading there instead of snapping back to the refuge.
+	if (Memory->TimeElapsed < Memory->CommitUntil)
+	{
+		AIC->MoveToLocation(Memory->CommitTarget, 50.f);
+		return;
+	}
+
+	// Stuck? Pick a reachable open escape away from the enemy and commit to it for 2s.
 	if (!Memory->bInitialized)
 	{
 		Memory->LastCheckedLocation = MyLoc;
@@ -267,17 +291,32 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 			Memory->StuckCheckTimer = 0.f;
 			if (Moved < 60.f)
 			{
-				const float Side = FMath::RandRange(-75.f, 75.f);
-				const FVector SideDir = Away.RotateAngleAxis(Side, FVector::UpVector);
-				AIC->MoveToLocation(MyLoc + SideDir * FleeDistance, 50.f);
-				UE_LOG(LogTemp, Log, TEXT("Flee: stuck, sidestep %.0f deg off-away"), Side);
+				++Memory->StuckCount;
+				// Sweep directions for one landing on reachable navmesh clear of us; commit to the first.
+				static const float Bases[] = { 0.f, 90.f, -90.f, 150.f, -150.f, 45.f, -45.f };
+				FVector Escape = FleeTarget;
+				for (int32 k = 0; k < UE_ARRAY_COUNT(Bases); ++k)
+				{
+					const float Ang = Bases[(Memory->StuckCount + k) % UE_ARRAY_COUNT(Bases)];
+					const FVector Dir = Away.RotateAngleAxis(Ang, FVector::UpVector);
+					FVector Nav;
+					if (ProjectFleePoint(Survivor->GetWorld(), MyLoc + Dir * FleeDistance, Nav)
+						&& FVector::Dist2D(Nav, MyLoc) > 200.f)
+					{
+						Escape = Nav;
+						break;
+					}
+				}
+				Memory->CommitTarget = Escape;
+				Memory->CommitUntil = Memory->TimeElapsed + 2.0f;
+				AIC->MoveToLocation(Escape, 50.f);
+				UE_LOG(LogTemp, Log, TEXT("Flee: wedged — committing to an open escape for 2s"));
 				return;
 			}
+			Memory->StuckCount = 0;
 		}
 	}
 
-	// Commit: keep moving to the flee target (re-issued so it tracks the enemy / a better refuge).
-	// FleeTarget is a safe known house when one lies away from the threat — so we flee toward loot
-	// and can re-arm there once we shake the enemy — otherwise a kiting point away from the threat.
+	// Keep moving to the flee target (re-issued so it tracks the threat / a better refuge).
 	AIC->MoveToLocation(FleeTarget, 50.f);
 }

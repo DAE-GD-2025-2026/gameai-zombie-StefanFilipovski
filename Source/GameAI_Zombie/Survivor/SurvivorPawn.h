@@ -118,7 +118,15 @@ protected:
 	/** Hysteresis for purge-zone escape: once we commit to leaving a zone we stay committed to that
 	 *  zone until we've clearly cleared it, so we don't jitter in/out at the blast-radius boundary. */
 	mutable TWeakObjectPtr<AActor> LatchedPurgeZone;
-	
+
+	/** Draw on-screen debug visualizers (perception ranges, known houses, perceived actors, current
+	 *  target, state readout). Toggle in the pawn's defaults or with the console: ai.SurvivorDebug 0/1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
+	bool bDrawDebug{true};
+
+	/** Renders the debug visualizers (called from Tick). */
+	void DrawDebug() const;
+
 public:
 	virtual void Tick(float DeltaTime) override;
 

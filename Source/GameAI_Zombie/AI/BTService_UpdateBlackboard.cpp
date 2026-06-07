@@ -8,6 +8,7 @@
 #include "Items/BaseItem.h"
 #include "Items/ItemType.h"
 #include "PurgeZones/PurgeZone.h"
+#include "Zombies/BaseZombie.h"
 #include "Kismet/GameplayStatics.h"
 
 namespace
@@ -92,12 +93,6 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 	// --- Flee decision ---
-	// Flee when we can't win: no weapon and taking damage (HP < 50%), or critically low HP.
-	// With a weapon we prefer to stand and fight (handled by the Fight branch).
-	// Flee decision.
-	// With NO weapon we can't fight, so be cautious: back away from a nearby zombie even at full
-	// HP (don't wait to be chased), and always retreat once hurt. With a weapon we stand and
-	// fight until HP is genuinely low.
 	AActor* EnemyForFlee = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
 	const bool bEnemyVisible = EnemyForFlee != nullptr;
 	const FVector MyLoc = Survivor->GetActorLocation();
@@ -106,9 +101,33 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		: MAX_FLT;
 	const bool bEnemyClose = bEnemyVisible && EnemyDist < 700.f;
 
-	// If we're unarmed but a weapon is within quick reach, ARM UP rather than flee to our death:
-	// suppress fleeing so the Pickup→Fight branches grab it and fight back. Fleeing an adjacent zombie
-	// with no weapon (and no escape) is how the survivor kept getting cornered and killed.
+	// Commit-to-fight: if armed and fleeing isn't opening distance, running is futile — latch a fight.
+	if (bEnemyVisible && bHasWeapon)
+	{
+		FleeProgressTimer += DeltaSeconds;
+		if (FleeProgressLastDist < 0.f) FleeProgressLastDist = EnemyDist;
+		if (FleeProgressTimer >= 1.5f)
+		{
+			const float Gained = EnemyDist - FleeProgressLastDist;
+			if (bFleeLatched && Gained < 150.f)
+			{
+				bFightCommitLatched = true;
+				UE_LOG(LogTemp, Warning, TEXT("Service: fleeing isn't gaining distance (%.0f) — committing to fight"), Gained);
+			}
+			FleeProgressTimer = 0.f;
+			FleeProgressLastDist = EnemyDist;
+		}
+	}
+	else
+	{
+		FleeProgressTimer = 0.f;
+		FleeProgressLastDist = -1.f;
+	}
+	// Release the commit once the threat is gone/far, or critically hurt with a medkit to heal mid-flee.
+	if (!bEnemyVisible || EnemyDist > 1300.f || (HealthPct < 0.2f && bHasMedkit))
+		bFightCommitLatched = false;
+
+	// Distance to the nearest weapon we can perceive or remember (used to decide whether to re-arm).
 	float NearestWeaponDist = MAX_FLT;
 	if (!bHasWeapon)
 	{
@@ -126,15 +145,23 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		for (const FVector& W : Survivor->GetKnownWeaponLocations())
 			NearestWeaponDist = FMath::Min(NearestWeaponDist, FVector::Dist2D(MyLoc, W));
 	}
-	const bool bWeaponWithinReach = !bHasWeapon && NearestWeaponDist < 1000.f;
+	const bool bWeaponWithinReach = !bHasWeapon && NearestWeaponDist < 1300.f;
 
-	// Flee is for genuine danger ONLY. We can't truly outrun zombies, so the winning play is to keep
-	// pursuing houses/weapons (Explore avoids enemy-adjacent houses and sprints under threat), arm up,
-	// and fight back. So flee only when: critically hurt, or genuinely cornered — unarmed with no
-	// weapon to grab AND no house to fall back to. Otherwise we stay aggressive and goal-seeking.
+	// Cornered: unarmed, no weapon to grab, no house to fall back to, enemy close.
 	const bool bHouseKnown = Survivor->GetKnownHouseCount() > 0;
 	const bool bCornered = !bHasWeapon && !bWeaponWithinReach && !bHouseKnown && bEnemyClose;
-	const bool bWantFlee = bEnemyVisible && (HealthPct < 0.25f || bCornered);
+
+	// Unarmed with an enemy close and no weapon to grab → flee toward a refuge to re-arm.
+	const bool bUnarmedDanger = !bHasWeapon && !bWeaponWithinReach && bEnemyClose;
+
+	// At critical HP, flee only if it helps: can run (stamina), can heal mid-flee (medkit), or unarmed.
+	float StamPctNow = 1.f;
+	if (UStaminaComponent* Stam = Survivor->GetStaminaComponent())
+		if (Stam->GetMaxStamina() > 0.f) StamPctNow = Stam->GetCurrentStamina() / Stam->GetMaxStamina();
+	const bool bCriticalFlee = (HealthPct < 0.25f) && (!bHasWeapon || bHasMedkit || StamPctNow > 0.15f);
+
+	// Don't flee a fight we've committed to (armed + can't shake the enemy) — stand and shoot.
+	const bool bWantFlee = bEnemyVisible && (bCriticalFlee || bCornered || bUnarmedDanger) && !bFightCommitLatched;
 
 	// Hysteresis: latch fleeing ON when we want to flee, and only release it once the enemy is
 	// clearly far (or gone). This stops the flee state from flickering when a chaser hovers around
@@ -142,19 +169,18 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 	if (!bEnemyVisible)            bFleeLatched = false;
 	else if (bWantFlee)           bFleeLatched = true;
 	else if (EnemyDist > 1200.f)  bFleeLatched = false;
+	if (bFightCommitLatched)      bFleeLatched = false;
+	if (bWeaponWithinReach)       bFleeLatched = false; // unarmed + weapon in reach → re-arm, don't flee
 
-	// Lethal purge zone overrides everything — if we're standing in a blast radius, flee out of it
-	// (the Flee task targets the way out) regardless of enemies.
+	// Purge zone overrides everything: flee out of the blast radius regardless of enemies.
 	const bool bInPurgeZone = (Survivor->GetActivePurgeZoneDanger() != nullptr);
 	const bool bShouldFlee = bInPurgeZone || (bEnemyVisible && bFleeLatched);
 
-	// Need heal: HP < 70% and we have a medkit.
-	// During combat: only heal if HP is critical (<50%) or we have no weapon (can't fight anyway).
-	// Outside combat: heal freely below 70%.
+	// Heal below 70% with a medkit; in combat only if critical (<50%) or unarmed.
 	const bool bCanHealNow = !bEnemyVisible || (HealthPct < 0.5f) || !bHasWeapon;
 	BB->SetValueAsBool(FName("bNeedsHeal"), HealthPct < 0.7f && bHasMedkit && bCanHealNow);
 
-	// Need food: stamina < 40% and we have food — also not during active combat (unless no weapon)
+	// Eat below 40% stamina with food; not in combat unless unarmed.
 	UStaminaComponent* Stamina = Survivor->GetStaminaComponent();
 	const float StaminaPct = (Stamina && Stamina->GetMaxStamina() > 0)
 		? Stamina->GetCurrentStamina() / Stamina->GetMaxStamina()
@@ -182,10 +208,27 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// --- Inventory management: keep room for weapons ---
-	// We want to carry up to TWO weapons so emptying one doesn't leave us defenceless. If the bag is
-	// full, we hold fewer than two weapons, and we have a comfortable consumable surplus (3+, so we
-	// keep at least two after dropping), proactively drop the least useful consumable to free a slot.
+	// No target but we perceive a zombie → acquire the nearest (OnPerceptionUpdated only fires on changes).
+	if (!BB->GetValueAsObject(FName("TargetEnemy")) && Survivor->GetPerceptionComponent())
+	{
+		TArray<AActor*> PerceivedActors;
+		Survivor->GetPerceptionComponent()->GetCurrentlyPerceivedActors(nullptr, PerceivedActors);
+		AActor* NearestEnemy = nullptr;
+		float NearestEnemyDist = MAX_FLT;
+		for (AActor* Actor : PerceivedActors)
+		{
+			if (!Cast<ABaseZombie>(Actor)) continue;
+			const float D = FVector::Dist(Survivor->GetActorLocation(), Actor->GetActorLocation());
+			if (D < NearestEnemyDist) { NearestEnemyDist = D; NearestEnemy = Actor; }
+		}
+		if (NearestEnemy)
+		{
+			BB->SetValueAsObject(FName("TargetEnemy"), NearestEnemy);
+			BB->SetValueAsVector(FName("LastKnownEnemyLocation"), NearestEnemy->GetActorLocation());
+		}
+	}
+
+	// --- Inventory: keep room for a second weapon by dropping a spare consumable when the bag is full ---
 	if (Inventory)
 	{
 		const TArray<ABaseItem*>& InvItems = Inventory->GetInventory();
@@ -218,8 +261,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			}
 		}
 
-		// Full bag, fewer than two weapons, 3+ consumables → drop the worst consumable to leave a slot
-		// open for a weapon (keeps at least two consumables).
+		// Full bag with <2 weapons and 3+ consumables → drop the worst consumable to leave room for a weapon.
 		if (bInvFull && WeaponCount < 2 && (MedkitCount + FoodCount) >= 3 && WorstConsumableSlot >= 0)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("STATUS: Only %d weapon(s) — dropping %s(%d) from slot %d to keep room for a weapon"),
@@ -235,17 +277,26 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 	AActor* TargetItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
 	bool bHasEmptySlot = false;
 	int32 ConsumableCount = 0;
+	int32 InvWeapons = 0, InvMedkits = 0, InvFood = 0;
 	if (Inventory)
 	{
 		for (ABaseItem* Slot : Inventory->GetInventory())
 		{
 			if (Slot == nullptr) { bHasEmptySlot = true; continue; }
-			if (IsConsumable(Slot->GetItemType())) ++ConsumableCount;
+			const EItemType T = Slot->GetItemType();
+			if (IsConsumable(T)) ++ConsumableCount;
+			if (IsWeapon(T)) ++InvWeapons;
+			else if (T == EItemType::Medkit) ++InvMedkits;
+			else if (T == EItemType::Food) ++InvFood;
 		}
 	}
-	// Even with a full bag we can still take a WEAPON, because Pickup drops a spare consumable for
-	// it (keeping at least one). This stops the agent leaving a second weapon behind in a house.
+	// Even with a full bag we can take a weapon (drop a spare consumable) or a needed medkit/food (drop a spare weapon).
 	const bool bCanDropForWeapon = (ConsumableCount >= 2);
+	const bool bCanDropWeaponForConsumable = (InvWeapons >= 3);
+	auto IsNeededConsumable = [&](EItemType T) -> bool
+	{
+		return (T == EItemType::Medkit && InvMedkits == 0) || (T == EItemType::Food && InvFood == 0);
+	};
 
 	if (TargetItem)
 	{
@@ -258,7 +309,8 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		{
 			ABaseItem* TI = Cast<ABaseItem>(TargetItem);
 			const bool bKeepWeaponTarget = TI && IsWeapon(TI->GetItemType()) && bCanDropForWeapon;
-			if (!bKeepWeaponTarget)
+			const bool bKeepConsumableTarget = TI && IsNeededConsumable(TI->GetItemType()) && bCanDropWeaponForConsumable;
+			if (!bKeepWeaponTarget && !bKeepConsumableTarget)
 			{
 				BB->ClearValue(FName("TargetItem"));
 				TargetItem = nullptr;
@@ -266,10 +318,8 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// If we have no target item but have inventory space, re-scan perception for visible items.
-	// OnPerceptionUpdated only fires on state changes — items already in sight won't re-trigger.
-	// Prioritize weapons over consumables when choosing what to go after.
-	if (!TargetItem && (bHasEmptySlot || bCanDropForWeapon) && Survivor->GetPerceptionComponent())
+	// No target item but we have room → re-scan perceived items (OnPerceptionUpdated only fires on changes).
+	if (!TargetItem && (bHasEmptySlot || bCanDropForWeapon || bCanDropWeaponForConsumable) && Survivor->GetPerceptionComponent())
 	{
 		TArray<AActor*> PerceivedActors;
 		Survivor->GetPerceptionComponent()->GetCurrentlyPerceivedActors(nullptr, PerceivedActors);
@@ -281,16 +331,21 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			ABaseItem* Item = Cast<ABaseItem>(Actor);
 			if (!Item || !IsValid(Item)) continue;
 			if (Item->GetItemType() == EItemType::Garbage) continue;
-			// With a full bag, only a weapon is worth going for (we'd drop a consumable for it).
-			if (!bHasEmptySlot && !IsWeapon(Item->GetItemType())) continue;
+			// With a full bag, only go for a weapon (drop a spare consumable) or a medkit/food we lack
+			// (drop a spare weapon). Other consumables we already have aren't worth the trip.
+			if (!bHasEmptySlot && !IsWeapon(Item->GetItemType()) && !IsNeededConsumable(Item->GetItemType())) continue;
 
 			const float Dist = FVector::Dist(Survivor->GetActorLocation(), Item->GetActorLocation());
 
-			// Score: weapons get massive bonus, closer items score higher
+			// Closer scores higher; weapons get a bonus; a medkit outranks weapons when HP < 30%.
 			float Score = 10000.f / FMath::Max(Dist, 1.f);
 			if (IsWeapon(Item->GetItemType()))
 			{
-				Score += 5000.f; // Always prefer weapons
+				Score += 5000.f;
+			}
+			if (HealthPct < 0.3f && Item->GetItemType() == EItemType::Medkit)
+			{
+				Score += 9000.f;
 			}
 			if (Score > BestScore)
 			{

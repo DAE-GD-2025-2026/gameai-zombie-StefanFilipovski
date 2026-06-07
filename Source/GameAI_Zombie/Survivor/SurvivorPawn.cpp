@@ -17,6 +17,13 @@
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
 #include "EngineUtils.h"
+#include "DrawDebugHelpers.h"
+#include "Items/ItemType.h"
+
+// Runtime toggle for the on-screen AI debug visualizers: console `ai.SurvivorDebug 0` / `1`.
+static TAutoConsoleVariable<int32> CVarSurvivorDebug(
+	TEXT("ai.SurvivorDebug"), 1,
+	TEXT("Draw Survivor AI debug visualizers (0 = off, 1 = on)."), ECVF_Cheat);
 
 ASurvivorPawn::ASurvivorPawn()
 {
@@ -40,24 +47,20 @@ ASurvivorPawn::ASurvivorPawn()
 
 	// ---- Sight Sense ----
 	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
-	SightConfig->SightRadius = 1400.0f;       // reach far enough to spot houses/items while roaming
+	SightConfig->SightRadius = 1400.0f;
 	SightConfig->LoseSightRadius = 1900.0f;
-	// Forward 240° vision cone (±120° half-angle) for spotting houses and items. The rear blind spot
-	// is handled two ways: a one-time 360° spin scan on spawn (to find the local cluster), and the
-	// Hearing sense for all-around threat awareness during play.
-	SightConfig->PeripheralVisionAngleDegrees = 120.0f;
+	// 180° forward cone (90° half-angle); rear threats are covered by Hearing and the Damage sense.
+	SightConfig->PeripheralVisionAngleDegrees = 90.0f;
 	SightConfig->DetectionByAffiliation.bDetectEnemies = true;
 	SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
 
 	// ---- Damage Sense ----
 	DamageConfig = CreateDefaultSubobject<UAISenseConfig_Damage>(TEXT("DamageConfig"));
 
-	// ---- Hearing Sense ----
-	// Zombies emit silent noise events (see ABaseZombie), so we sense nearby ones from ANY direction,
-	// even outside the sight cone (e.g. a chaser behind us). This is the textbook second sense.
+	// ---- Hearing Sense (360°, for threats outside the sight cone) ----
 	HearingConfig = CreateDefaultSubobject<UAISenseConfig_Hearing>(TEXT("HearingConfig"));
 	HearingConfig->HearingRange = 1300.0f;
-	HearingConfig->SetMaxAge(1.5f); // forget a noise 1.5s after it was last heard
+	HearingConfig->SetMaxAge(1.5f);
 	HearingConfig->DetectionByAffiliation.bDetectEnemies = true;
 	HearingConfig->DetectionByAffiliation.bDetectNeutrals = true;
 
@@ -108,20 +111,21 @@ void ASurvivorPawn::OnSurvivorDeath()
 
 void ASurvivorPawn::OnSurvivorDamaged()
 {
-	// We were hit — the attacker may be in our sight blind spot or behind us, and the damage carried no
-	// instigator. Acquire the NEAREST zombie (a melee attacker is right on top of us) as the target so
-	// the Fight branch turns to face it and shoots back, instead of taking free hits from behind.
+	// Hit → target the nearest perceived zombie so the Fight branch turns and shoots back.
 	ASurvivorAIController* AIC = Cast<ASurvivorAIController>(GetController());
-	if (!AIC || !GetWorld()) return;
+	if (!AIC) return;
 	UBlackboardComponent* BB = AIC->GetBB();
-	if (!BB) return;
+	if (!BB || !PerceptionComp) return;
+
+	TArray<AActor*> Perceived;
+	PerceptionComp->GetCurrentlyPerceivedActors(nullptr, Perceived);
 
 	const FVector MyLoc = GetActorLocation();
 	ABaseZombie* Nearest = nullptr;
-	float BestDist = 700.f; // melee range — close enough that it's almost certainly our attacker
-	for (TActorIterator<ABaseZombie> It(GetWorld()); It; ++It)
+	float BestDist = MAX_FLT;
+	for (AActor* A : Perceived)
 	{
-		ABaseZombie* Z = *It;
+		ABaseZombie* Z = Cast<ABaseZombie>(A);
 		if (!Z) continue;
 		const float D = FVector::Dist2D(MyLoc, Z->GetActorLocation());
 		if (D < BestDist) { BestDist = D; Nearest = Z; }
@@ -131,7 +135,20 @@ void ASurvivorPawn::OnSurvivorDamaged()
 	{
 		BB->SetValueAsObject(FName("TargetEnemy"), Nearest);
 		BB->SetValueAsVector(FName("LastKnownEnemyLocation"), Nearest->GetActorLocation());
-		UE_LOG(LogTemp, Warning, TEXT("Damage: hit by an unseen enemy — turning to fight nearest zombie (%.0f units)"), BestDist);
+		UE_LOG(LogTemp, Warning, TEXT("Damage: hit — engaging nearest perceived zombie (%.0f units)"), BestDist);
+	}
+	else
+	{
+		// Hit but no zombie in the cone (blind-spot attacker) → turn toward the last known enemy to reacquire.
+		const FVector LastKnown = BB->GetValueAsVector(FName("LastKnownEnemyLocation"));
+		FVector Face = (!LastKnown.IsZero())
+			? (LastKnown - MyLoc).GetSafeNormal2D()
+			: (-GetActorForwardVector().GetSafeNormal2D());
+		if (!Face.IsNearlyZero())
+		{
+			SetActorRotation(Face.Rotation());
+			UE_LOG(LogTemp, Warning, TEXT("Damage: hit from blind spot — turning to reacquire the attacker"));
+		}
 	}
 }
 
@@ -148,8 +165,18 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 
 	const bool bSensed = Stimulus.WasSuccessfullySensed();
 
-	// Houses are discovered by the radial live query in Tick (not the sight cone), so ignore them here.
-	if (Cast<AHouse>(Actor)) return;
+	// --- HOUSE perceived (via Sight): remember it and its type so exploration can head there later ---
+	if (AHouse* House = Cast<AHouse>(Actor))
+	{
+		if (bSensed && !KnownHouses.Contains(Actor))
+		{
+			KnownHouses.Add(Actor);
+			LastHouseDiscoveryTime = GetWorld() ? GetWorld()->GetTimeSeconds() : LastHouseDiscoveryTime;
+			UE_LOG(LogTemp, Log, TEXT("Perception: house discovered — %s at %s (%d known)"),
+				*House->GetHouseTypeString(), *Actor->GetActorLocation().ToString(), KnownHouses.Num());
+		}
+		return;
+	}
 
 	// --- PURGE ZONE perceived: remember it so we can flee its blast radius ---
 	if (Cast<APurgeZone>(Actor))
@@ -223,18 +250,42 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 				}
 				if (!bHasEmptySlot)
 				{
-					const bool bIsWeapon = (Item->GetItemType() == EItemType::Pistol || Item->GetItemType() == EItemType::Shotgun);
-					if (!bIsWeapon || !bHasConsumable)
+					int32 WeaponCount = 0, MedkitCount = 0, FoodCount = 0;
+					for (ABaseItem* CntSlot : Inv->GetInventory())
 					{
-						return; // inventory full, can't make room
+						if (!CntSlot) continue;
+						const EItemType ST = CntSlot->GetItemType();
+						if (ST == EItemType::Pistol || ST == EItemType::Shotgun) ++WeaponCount;
+						else if (ST == EItemType::Medkit) ++MedkitCount;
+						else if (ST == EItemType::Food) ++FoodCount;
+					}
+					const EItemType NT = Item->GetItemType();
+					const bool bIsWeapon = (NT == EItemType::Pistol || NT == EItemType::Shotgun);
+					// A medkit/food we don't currently hold is worth dropping a SPARE weapon for (keep >=2).
+					const bool bNeededConsumable = (NT == EItemType::Medkit && MedkitCount == 0)
+						|| (NT == EItemType::Food && FoodCount == 0);
+					const bool bCanDropForWeapon = bIsWeapon && bHasConsumable;
+					const bool bCanDropForConsumable = bNeededConsumable && WeaponCount >= 3;
+					if (!bCanDropForWeapon && !bCanDropForConsumable)
+					{
+						return; // inventory full, can't make worthwhile room
 					}
 					// Weapon spotted + we have a consumable to drop — let pickup task handle the swap
 				}
 			}
 
-			// Priority: Weapons > Consumables. Never switch from a weapon to a consumable.
-			// Within the same priority tier, prefer closer items.
-			auto IsWeaponType = [](EItemType T) { return T == EItemType::Pistol || T == EItemType::Shotgun; };
+			// Knowledge-based priority. When badly hurt (HP < 30%) first aid (Medkit) is the top
+			// priority; otherwise weapons beat consumables. Within the same tier, prefer the closer item.
+			const float HpPct = (HealthComponent && HealthComponent->GetMaxHealth() > 0)
+				? static_cast<float>(HealthComponent->GetHealth()) / static_cast<float>(HealthComponent->GetMaxHealth())
+				: 1.f;
+			auto ItemPriority = [HpPct](EItemType T) -> int
+			{
+				if (HpPct < 0.3f && T == EItemType::Medkit) return 3; // urgent heal beats everything
+				if (T == EItemType::Pistol || T == EItemType::Shotgun) return 2; // weapons
+				if (T == EItemType::Medkit || T == EItemType::Food) return 1; // other consumables
+				return 0;
+			};
 
 			ABaseItem* CurrentTarget = Cast<ABaseItem>(BB->GetValueAsObject(FName("TargetItem")));
 			if (!CurrentTarget || !IsValid(CurrentTarget))
@@ -245,30 +296,28 @@ void ASurvivorPawn::OnPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 			}
 			else
 			{
-				const bool bNewIsWeapon = IsWeaponType(Item->GetItemType());
-				const bool bCurrentIsWeapon = IsWeaponType(CurrentTarget->GetItemType());
+				const int NewPri = ItemPriority(Item->GetItemType());
+				const int CurPri = ItemPriority(CurrentTarget->GetItemType());
 
 				bool bShouldSwitch = false;
-				if (bNewIsWeapon && !bCurrentIsWeapon)
+				if (NewPri > CurPri)
 				{
-					// Always switch: weapon beats consumable
-					bShouldSwitch = true;
+					bShouldSwitch = true; // higher-priority item (weapon, or first aid when hurt)
 				}
-				else if (bNewIsWeapon == bCurrentIsWeapon)
+				else if (NewPri == CurPri)
 				{
 					// Same tier — prefer closer
 					const float DistToNew = FVector::Dist(GetActorLocation(), Item->GetActorLocation());
 					const float DistToCurrent = FVector::Dist(GetActorLocation(), CurrentTarget->GetActorLocation());
 					bShouldSwitch = (DistToNew < DistToCurrent);
 				}
-				// else: new is consumable, current is weapon — never switch
+				// else: new item is lower priority — keep current target
 
 				if (bShouldSwitch)
 				{
 					BB->SetValueAsObject(FName("TargetItem"), Item);
-					UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d (switching: %s)"),
-						static_cast<int>(Item->GetItemType()),
-						(bNewIsWeapon && !bCurrentIsWeapon) ? TEXT("weapon priority") : TEXT("closer"));
+					UE_LOG(LogTemp, Log, TEXT("Perception: Item SENSED - Type %d (switching, priority %d)"),
+						static_cast<int>(Item->GetItemType()), NewPri);
 				}
 			}
 		}
@@ -288,23 +337,31 @@ APurgeZone* ASurvivorPawn::GetActivePurgeZoneDanger() const
 {
 	const FVector MyLoc = GetActorLocation();
 
-	// Hysteresis: if we already committed to leaving a zone, keep escaping it until we've clearly
-	// cleared the blast radius. This stops the in/out jitter at the boundary.
+	// A zone only hurts us at DETONATION, so we may freely walk through one that's still charging. We
+	// only treat a zone as dangerous if we're standing in it AND it's about to go off within this lead.
+	const float DangerLead = 2.0f;
+
+	// Hysteresis: once we commit to clearing a zone, keep stepping out until we're just past its edge
+	// (or it's no longer imminent — it fired / reset). Small margin so we don't oscillate.
 	if (APurgeZone* Latched = Cast<APurgeZone>(LatchedPurgeZone.Get()))
 	{
 		const float Dist = FVector::Dist2D(MyLoc, Latched->GetActorLocation());
-		if (Dist > Latched->GetRadius() + 250.f) LatchedPurgeZone = nullptr; // cleared
-		else                                     return Latched;             // still escaping
+		const float Remaining = Latched->GetTimeTillPurge() - Latched->GetTimePassed();
+		if (Dist > Latched->GetRadius() + 90.f || Remaining > DangerLead + 1.0f) LatchedPurgeZone = nullptr;
+		else return Latched; // still stepping out
 	}
 
-	// Otherwise only react when we're actually inside (or right at the edge of) a zone — the map
-	// spawns many small zones, so reacting to distant ones would block normal movement constantly.
+	// Only flee a zone we're inside that is ABOUT to detonate. Charging zones are walkable, so we don't
+	// freeze / ping-pong around ones that are merely in our path.
 	APurgeZone* Nearest = nullptr;
 	float NearestDist = MAX_FLT;
 	for (const TWeakObjectPtr<AActor>& Z : KnownPurgeZones)
 	{
 		APurgeZone* Zone = Cast<APurgeZone>(Z.Get());
 		if (!Zone) continue;
+
+		const float Remaining = Zone->GetTimeTillPurge() - Zone->GetTimePassed();
+		if (Remaining > DangerLead) continue; // not about to blow → safe to be here / walk through
 
 		const float Dist = FVector::Dist2D(MyLoc, Zone->GetActorLocation());
 		if (Dist < Zone->GetRadius() + 40.f && Dist < NearestDist)
@@ -329,40 +386,153 @@ void ASurvivorPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Live house query: periodically become aware of any house within HouseSenseRadius, in ANY
-	// direction. This is how we acquire house knowledge — distance-based proximity rather than the
-	// forward sight cone — so we reliably notice nearby buildings instead of walking past ones that
-	// happen to be off to our side. Knowledge still grows with exploration (we only learn houses we
-	// come near), we just don't depend on facing them.
-	HouseQueryTimer += DeltaTime;
-	if (HouseQueryTimer >= HouseQueryInterval && GetWorld())
-	{
-		HouseQueryTimer = 0.f;
-		const FVector MyLoc = GetActorLocation();
-		for (TActorIterator<AHouse> It(GetWorld()); It; ++It)
-		{
-			AHouse* H = *It;
-			if (!H) continue;
-			if (FVector::Dist2D(MyLoc, H->GetActorLocation()) > HouseSenseRadius) continue;
-			if (KnownHouses.Contains(H)) continue;
-
-			KnownHouses.Add(H);
-			LastHouseDiscoveryTime = GetWorld()->GetTimeSeconds();
-			UE_LOG(LogTemp, Log, TEXT("Knowledge: house discovered — %s at %s (%d known)"),
-				*H->GetHouseTypeString(), *H->GetActorLocation().ToString(), KnownHouses.Num());
-		}
-	}
-
-	// Keep the survivor pinned to its ground height. Without this, being pushed into a wall
-	// or walking into a zombie can make the capsule ride up and "climb" onto geometry.
+	// Pin to ground height so pushing into walls/zombies can't make the capsule climb geometry.
 	if (bGroundZSet)
 	{
 		FVector Loc = GetActorLocation();
 		if (!FMath::IsNearlyEqual(Loc.Z, GroundZ, 1.0f))
 		{
 			Loc.Z = GroundZ;
-			SetActorLocation(Loc, false); // no sweep — just correct the height
+			SetActorLocation(Loc, false);
 		}
+	}
+
+	// The sight cone aims along the controller's control rotation (APawn::GetViewRotation), so sync it to
+	// our facing each frame — otherwise the cone would point a fixed direction while the body turns.
+	if (AController* C = GetController())
+	{
+		C->SetControlRotation(GetActorRotation());
+	}
+
+	DrawDebug();
+}
+
+void ASurvivorPawn::DrawDebug() const
+{
+	if (!bDrawDebug || CVarSurvivorDebug.GetValueOnGameThread() == 0) return;
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	const FVector Loc = GetActorLocation();
+	const FVector Ground(Loc.X, Loc.Y, Loc.Z + 5.f);
+	const FVector PlaneY(1.f, 0.f, 0.f), PlaneZ(0.f, 1.f, 0.f); // flat (top-down) circles
+
+	// --- Perception ranges (read straight from the sense configs) ---
+	const float SightR = SightConfig ? SightConfig->SightRadius : 1400.f;
+	const float LoseR  = SightConfig ? SightConfig->LoseSightRadius : 1900.f;
+	const float HearR  = HearingConfig ? HearingConfig->HearingRange : 1300.f;
+	const float HalfFOV = SightConfig ? SightConfig->PeripheralVisionAngleDegrees : 90.f; // sight cone half-angle
+	const FVector Fwd = GetActorForwardVector().GetSafeNormal2D();
+
+	// Draw the sight cone (a wedge) so the debug matches what sight can actually see.
+	auto DrawSightCone = [&](float Radius, FColor Color, float Thickness)
+	{
+		const FVector EdgeL = Ground + Fwd.RotateAngleAxis(-HalfFOV, FVector::UpVector) * Radius;
+		const FVector EdgeR = Ground + Fwd.RotateAngleAxis(+HalfFOV, FVector::UpVector) * Radius;
+		DrawDebugLine(World, Ground, EdgeL, Color, false, -1.f, 0, Thickness);
+		DrawDebugLine(World, Ground, EdgeR, Color, false, -1.f, 0, Thickness);
+		const int32 Segs = 24;
+		FVector Prev = EdgeL;
+		for (int32 i = 1; i <= Segs; ++i)
+		{
+			const float Ang = -HalfFOV + (2.f * HalfFOV) * (static_cast<float>(i) / Segs);
+			const FVector P = Ground + Fwd.RotateAngleAxis(Ang, FVector::UpVector) * Radius;
+			DrawDebugLine(World, Prev, P, Color, false, -1.f, 0, Thickness);
+			Prev = P;
+		}
+	};
+	DrawSightCone(SightR, FColor(0, 220, 0), 3.f); // sight gain cone
+	DrawSightCone(LoseR,  FColor(0, 90, 0),  1.f); // sight lose cone
+	DrawDebugCircle(World, Ground, HearR, 48, FColor(220, 200, 0), false, -1.f, 0, 1.f, PlaneY, PlaneZ, false); // hearing is genuinely 360°
+
+	// Facing tick.
+	DrawDebugLine(World, Ground, Ground + Fwd * 160.f, FColor::White, false, -1.f, 0, 3.f);
+
+	// --- Known houses (memory) in cyan, with type labels ---
+	for (const TWeakObjectPtr<AActor>& H : KnownHouses)
+	{
+		if (AHouse* House = Cast<AHouse>(H.Get()))
+		{
+			const FVector HL = House->GetActorLocation();
+			DrawDebugSphere(World, HL, 90.f, 12, FColor::Cyan, false, -1.f, 0, 2.f);
+			DrawDebugString(World, HL + FVector(0, 0, 130), House->GetHouseTypeString(), nullptr, FColor::Cyan, 0.f, true);
+		}
+	}
+
+	// --- Known purge zones in orange ---
+	for (const TWeakObjectPtr<AActor>& Z : KnownPurgeZones)
+	{
+		if (AActor* PZ = Z.Get())
+			DrawDebugSphere(World, PZ->GetActorLocation(), 110.f, 12, FColor::Orange, false, -1.f, 0, 2.f);
+	}
+
+	// --- Currently PERCEIVED actors: zombies red, items green ---
+	if (PerceptionComp)
+	{
+		TArray<AActor*> Perceived;
+		PerceptionComp->GetCurrentlyPerceivedActors(nullptr, Perceived);
+		for (AActor* A : Perceived)
+		{
+			if (Cast<ABaseZombie>(A))     DrawDebugSphere(World, A->GetActorLocation(), 60.f, 10, FColor::Red,   false, -1.f, 0, 2.f);
+			else if (Cast<ABaseItem>(A))  DrawDebugSphere(World, A->GetActorLocation(), 45.f, 8,  FColor::Green, false, -1.f, 0, 2.f);
+		}
+	}
+
+	// --- Current targets + state readout (from the blackboard) ---
+	FString State = TEXT("EXPLORE");
+	if (ASurvivorAIController* AIC = Cast<ASurvivorAIController>(GetController()))
+	{
+		if (UBlackboardComponent* BB = AIC->GetBB())
+		{
+			AActor* Enemy = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
+			AActor* Item  = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
+			if (Enemy)
+			{
+				DrawDebugLine(World, Ground, Enemy->GetActorLocation(), FColor::Red, false, -1.f, 0, 2.f);
+				DrawDebugSphere(World, Enemy->GetActorLocation(), 75.f, 12, FColor::Red, false, -1.f, 0, 3.f);
+			}
+			if (Item)
+			{
+				DrawDebugLine(World, Ground, Item->GetActorLocation(), FColor::Green, false, -1.f, 0, 2.f);
+			}
+
+			const bool bHasW = BB->GetValueAsBool(FName("bHasWeapon"));
+			if (BB->GetValueAsBool(FName("bShouldFlee"))) State = TEXT("FLEE");
+			else if (Enemy && bHasW)                      State = TEXT("FIGHT");
+			else if (Item)                                State = TEXT("PICKUP");
+			else                                          State = TEXT("EXPLORE");
+		}
+	}
+
+	// --- On-screen status panel ---
+	if (GEngine)
+	{
+		const int32 HP = HealthComponent ? HealthComponent->GetHealth() : 0;
+		const int32 MaxHP = HealthComponent ? HealthComponent->GetMaxHealth() : 0;
+		const float StamPct = (StaminaComponent && StaminaComponent->GetMaxStamina() > 0.f)
+			? 100.f * StaminaComponent->GetCurrentStamina() / StaminaComponent->GetMaxStamina() : 0.f;
+
+		int32 Weapons = 0, Consumables = 0;
+		if (InventoryComponent)
+		{
+			for (ABaseItem* S : InventoryComponent->GetInventory())
+			{
+				if (!S) continue;
+				const EItemType T = S->GetItemType();
+				if (T == EItemType::Pistol || T == EItemType::Shotgun) ++Weapons;
+				else if (T == EItemType::Food || T == EItemType::Medkit) ++Consumables;
+			}
+		}
+
+		GEngine->AddOnScreenDebugMessage(101, 0.f, FColor::Yellow, FString::Printf(TEXT("STATE: %s"), *State));
+		GEngine->AddOnScreenDebugMessage(102, 0.f, FColor::White,
+			FString::Printf(TEXT("HP %d/%d   Stamina %.0f%%"), HP, MaxHP, StamPct));
+		GEngine->AddOnScreenDebugMessage(103, 0.f, FColor::White,
+			FString::Printf(TEXT("Bag: %d weapon(s), %d consumable(s)"), Weapons, Consumables));
+		GEngine->AddOnScreenDebugMessage(104, 0.f, FColor::Cyan,
+			FString::Printf(TEXT("Houses known: %d"), KnownHouses.Num()));
+		GEngine->AddOnScreenDebugMessage(105, 0.f, FColor::Silver,
+			TEXT("[green]=sight [yellow]=hearing  cyan=house  red=zombie  green=item"));
 	}
 }
 

@@ -23,7 +23,11 @@ private:
 	/** Timer for periodic debug status log */
 	float DebugLogTimer = 0.f;
 
-	/** Hysteresis for the flee decision: once we start fleeing we stay committed until the
-	 *  enemy is clearly far/gone, instead of flickering when a chaser hovers near the trigger range. */
+	/** Hysteresis: stay fleeing until the enemy is clearly far/gone, to stop flicker near the trigger range. */
 	bool bFleeLatched = false;
+
+	/** Set when an armed flee isn't gaining distance; suppresses flee so we stand and fight instead. */
+	bool bFightCommitLatched = false;
+	float FleeProgressTimer = 0.f;
+	float FleeProgressLastDist = -1.f;
 };

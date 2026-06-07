@@ -26,7 +26,7 @@ void UHealthComponent::TakeDamage(int Amount)
 	}
 	else if (Amount > 0)
 	{
-		// Still alive and actually took a hit — let listeners react (e.g. turn to face the attacker).
+		// Took a hit and still alive — notify listeners.
 		OnDamaged.Broadcast();
 	}
 }
