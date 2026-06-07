@@ -8,7 +8,7 @@
 
 // Declare OnDeath
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeathSignature);
-// Broadcast whenever damage is taken (so the AI can react to being hit — e.g. by an attacker it can't see).
+// Broadcast whenever damage is taken
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDamagedSignature);
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))

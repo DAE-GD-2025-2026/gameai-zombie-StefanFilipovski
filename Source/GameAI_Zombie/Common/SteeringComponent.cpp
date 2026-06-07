@@ -30,9 +30,7 @@ float USteeringComponent::GetReferenceSpeed() const
 	return 600.f;
 }
 
-// ---------------------------------------------------------------------------
 // Public requests
-// ---------------------------------------------------------------------------
 void USteeringComponent::SeekTo(const FVector& Target)   { Mode = ESteeringMode::Seek;   TargetLocation = Target; }
 void USteeringComponent::ArriveAt(const FVector& Target) { Mode = ESteeringMode::Arrive; TargetLocation = Target; }
 void USteeringComponent::FleeFrom(const FVector& Threat) { Mode = ESteeringMode::Flee;   TargetLocation = Threat; }
@@ -45,9 +43,7 @@ bool USteeringComponent::HasArrived(float Radius) const
 	return FVector::Dist2D(OwnerPawn->GetActorLocation(), TargetLocation) <= Radius;
 }
 
-// ---------------------------------------------------------------------------
 // Individual steering behaviors (each returns a desired velocity)
-// ---------------------------------------------------------------------------
 FVector USteeringComponent::Seek(const FVector& Target) const
 {
 	const FVector Dir = (Target - OwnerPawn->GetActorLocation()).GetSafeNormal2D();
@@ -89,10 +85,7 @@ FVector USteeringComponent::Wander(float DeltaTime)
 
 FVector USteeringComponent::ObstacleAvoidance(const FVector& DesiredDir) const
 {
-	// Deliberately gentle: two angled feeler whiskers that only nudge us sideways away
-	// from a wall we're about to scrape. It never reduces forward drive and (with its low
-	// weight) never overrides the primary force, so the agent still commits into doorways
-	// and rooms. Genuine dead-ends are handled by the task-level stall/re-plan, not here.
+	// Gentle: two angled whiskers nudge us sideways off a wall without cutting forward speed.
 	FVector Forward = DesiredDir.GetSafeNormal2D();
 	if (Forward.IsNearlyZero()) Forward = OwnerPawn->GetActorForwardVector().GetSafeNormal2D();
 	if (Forward.IsNearlyZero()) return FVector::ZeroVector;
@@ -136,7 +129,7 @@ FVector USteeringComponent::ObstacleAvoidance(const FVector& DesiredDir) const
 
 FVector USteeringComponent::Separation() const
 {
-	// Keep distance from nearby zombies — uses ONLY perceived actors (no world omniscience).
+	// Keep distance from nearby zombies - uses ONLY perceived actors (no world omniscience).
 	UAIPerceptionComponent* Perception = OwnerPawn->FindComponentByClass<UAIPerceptionComponent>();
 	if (!Perception) return FVector::ZeroVector;
 
@@ -161,9 +154,7 @@ FVector USteeringComponent::Separation() const
 	return Push * GetReferenceSpeed();
 }
 
-// ---------------------------------------------------------------------------
 // Blended steering: combine weighted behaviors and drive the pawn
-// ---------------------------------------------------------------------------
 void USteeringComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	FActorComponentTickFunction* ThisTickFunction)
 {
@@ -183,9 +174,7 @@ void USteeringComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	default: break;
 	}
 
-	// 2) Blend in the always-on behaviors with their weights.
-	//    Avoidance steers along the PRIMARY desired direction so it turns us around
-	//    walls without cancelling our forward speed.
+	// 2) Blend in the always-on behaviors; avoidance steers along the primary direction.
 	FVector Steering = Primary * PrimaryWeight;
 	if (bUseObstacleAvoidance) Steering += ObstacleAvoidance(Primary) * AvoidanceWeight;
 	if (bUseSeparation)        Steering += Separation() * SeparationWeight;

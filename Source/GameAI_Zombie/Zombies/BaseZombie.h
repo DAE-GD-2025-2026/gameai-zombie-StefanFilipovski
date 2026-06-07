@@ -27,9 +27,7 @@ public:
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
 protected:
-	/** Zombies are "noisy" — they periodically report a silent AIPerception noise event so the
-	 *  survivor's Hearing sense can detect them nearby from any direction (not just its sight cone).
-	 *  This is a gameplay stimulus only; no actual audio is played. */
+	//Periodically report a silent AIPerception noise so Hearing can detect them
 	float NoiseEmitTimer{0.f};
 
 	UPROPERTY(EditDefaultsOnly, Category = "Perception")

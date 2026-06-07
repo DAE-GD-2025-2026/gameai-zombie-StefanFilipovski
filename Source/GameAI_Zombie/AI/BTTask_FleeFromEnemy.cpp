@@ -31,7 +31,7 @@ static FVector GetThreatLocation(UBlackboardComponent* BB, const FVector& Fallba
 	return LastKnown.IsZero() ? Fallback : LastKnown;
 }
 
-// Project a point onto the navmesh; true only if a reachable point lies near the request (rejects off-map).
+// Project a point onto the navmesh
 static bool ProjectFleePoint(UWorld* World, const FVector& In, FVector& Out)
 {
 	UNavigationSystemV1* Nav = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
@@ -45,8 +45,7 @@ static bool ProjectFleePoint(UWorld* World, const FVector& In, FVector& Out)
 	return false;
 }
 
-// Where to flee to: a reachable known house away from the threat, else the best in-bounds navmesh point
-// from a fan of directions (farthest from threat, tie-broken toward the explored region).
+// Flee target
 static FVector ComputeFleeTarget(ASurvivorPawn* Survivor, const FVector& MyLoc, const FVector& ThreatLoc, bool& bOutToHouse)
 {
 	bOutToHouse = false;
@@ -78,7 +77,7 @@ static FVector ComputeFleeTarget(ASurvivorPawn* Survivor, const FVector& MyLoc, 
 		}
 	}
 
-	// Centroid of known houses = the explored region; bias the fan toward it.
+	// Center of known houses = the explored region.
 	FVector Home = FVector::ZeroVector;
 	int32 Count = 0;
 	for (const TWeakObjectPtr<AActor>& H : Survivor->GetKnownHouses())
@@ -87,7 +86,7 @@ static FVector ComputeFleeTarget(ASurvivorPawn* Survivor, const FVector& MyLoc, 
 	if (bHaveHome) Home /= Count;
 	const FVector ToHomeDir = bHaveHome ? (Home - MyLoc).GetSafeNormal2D() : FVector::ZeroVector;
 
-	// Fan directions out from straight-away; keep the best in-bounds, navmesh-valid one.
+	// Fan directions out from straight-away.
 	static const float Angles[] = { 0.f, 25.f, -25.f, 50.f, -50.f, 80.f, -80.f, 110.f, -110.f };
 	FVector BestTarget = MyLoc + Away * 300.f;
 	float BestScore = -MAX_FLT;
@@ -135,11 +134,11 @@ EBTNodeResult::Type UBTTask_FleeFromEnemy::ExecuteTask(UBehaviorTreeComponent& O
 
 	const FVector MyLoc = Survivor->GetActorLocation();
 
-	// Purge zone takes precedence: sprint out of the blast radius.
+	//  sprint out of the blast radius.
 	if (APurgeZone* Zone = Survivor->GetActivePurgeZoneDanger())
 	{
 		AIC->MoveToLocation(PurgeEscapeTarget(Survivor, MyLoc, Zone), 50.f);
-		UE_LOG(LogTemp, Warning, TEXT("Flee: START — ESCAPING PURGE ZONE (radius %.0f)"), Zone->GetRadius());
+		UE_LOG(LogTemp, Warning, TEXT("Flee: START - ESCAPING PURGE ZONE (radius %.0f)"), Zone->GetRadius());
 		return EBTNodeResult::InProgress;
 	}
 
@@ -148,7 +147,7 @@ EBTNodeResult::Type UBTTask_FleeFromEnemy::ExecuteTask(UBehaviorTreeComponent& O
 	const FVector FleeTarget = ComputeFleeTarget(Survivor, MyLoc, ThreatLoc, bToHouse);
 
 	UE_LOG(LogTemp, Log, TEXT("Flee: START (threat %.0f units away)%s"),
-		FVector::Dist(MyLoc, ThreatLoc), bToHouse ? TEXT(" — toward a safe house") : TEXT(""));
+		FVector::Dist(MyLoc, ThreatLoc), bToHouse ? TEXT(" - toward a safe house") : TEXT(""));
 
 	AIC->MoveToLocation(FleeTarget, 50.f);
 	return EBTNodeResult::InProgress;
@@ -176,7 +175,7 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 
 	Survivor->StartRunning();
 
-	// Use items while fleeing (instant, no stopping), since Flee outranks the Heal/Food branches.
+	// Use items while fleeing
 	UInventoryComponent* Inv = Survivor->GetInventoryComponent();
 
 	// Heal if hurt.
@@ -232,7 +231,7 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		return;
 	}
 
-	// Escaped only when no perceived zombie is still close (checking just TargetEnemy caused stop/restart jitter).
+	// Escaped only when no perceived zombie is still close.
 	{
 		float NearestZombie = MAX_FLT;
 		if (UAIPerceptionComponent* Perc = Survivor->GetPerceptionComponent())
@@ -248,7 +247,7 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 			AIC->StopMovement();
 			Survivor->StopRunning();
 			BB->ClearValue(FName("TargetEnemy"));
-			UE_LOG(LogTemp, Log, TEXT("Flee: escaped — no zombie nearby, stopping"));
+			UE_LOG(LogTemp, Log, TEXT("Flee: escaped - no zombie nearby, stopping"));
 			FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 			return;
 		}
@@ -292,7 +291,7 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 			if (Moved < 60.f)
 			{
 				++Memory->StuckCount;
-				// Sweep directions for one landing on reachable navmesh clear of us; commit to the first.
+				// Sweep directions for a reachable navmesh point clear of us.
 				static const float Bases[] = { 0.f, 90.f, -90.f, 150.f, -150.f, 45.f, -45.f };
 				FVector Escape = FleeTarget;
 				for (int32 k = 0; k < UE_ARRAY_COUNT(Bases); ++k)
@@ -310,13 +309,13 @@ void UBTTask_FleeFromEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 				Memory->CommitTarget = Escape;
 				Memory->CommitUntil = Memory->TimeElapsed + 2.0f;
 				AIC->MoveToLocation(Escape, 50.f);
-				UE_LOG(LogTemp, Log, TEXT("Flee: wedged — committing to an open escape for 2s"));
+				UE_LOG(LogTemp, Log, TEXT("Flee: wedged - committing to an open escape for 2s"));
 				return;
 			}
 			Memory->StuckCount = 0;
 		}
 	}
 
-	// Keep moving to the flee target (re-issued so it tracks the threat / a better refuge).
+	// Keep moving to the flee target.
 	AIC->MoveToLocation(FleeTarget, 50.f);
 }

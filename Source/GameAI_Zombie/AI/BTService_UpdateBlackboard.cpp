@@ -33,7 +33,7 @@ namespace
 UBTService_UpdateBlackboard::UBTService_UpdateBlackboard()
 {
 	NodeName = "Update Survivor Blackboard";
-	Interval = 0.25f;       // Update 4x per second — plenty fast, not wasteful
+	Interval = 0.25f;       // 4x per second
 	RandomDeviation = 0.05f;
 }
 
@@ -101,7 +101,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		: MAX_FLT;
 	const bool bEnemyClose = bEnemyVisible && EnemyDist < 700.f;
 
-	// Commit-to-fight: if armed and fleeing isn't opening distance, running is futile — latch a fight.
+	// Commit to fight: if armed and fleeing isn't opening distance, latch a fight.
 	if (bEnemyVisible && bHasWeapon)
 	{
 		FleeProgressTimer += DeltaSeconds;
@@ -112,7 +112,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			if (bFleeLatched && Gained < 150.f)
 			{
 				bFightCommitLatched = true;
-				UE_LOG(LogTemp, Warning, TEXT("Service: fleeing isn't gaining distance (%.0f) — committing to fight"), Gained);
+				UE_LOG(LogTemp, Warning, TEXT("Service: fleeing isn't gaining distance (%.0f) - committing to fight"), Gained);
 			}
 			FleeProgressTimer = 0.f;
 			FleeProgressLastDist = EnemyDist;
@@ -151,7 +151,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 	const bool bHouseKnown = Survivor->GetKnownHouseCount() > 0;
 	const bool bCornered = !bHasWeapon && !bWeaponWithinReach && !bHouseKnown && bEnemyClose;
 
-	// Unarmed with an enemy close and no weapon to grab → flee toward a refuge to re-arm.
+	// Unarmed with an enemy close and no weapon to grab -> flee toward a refuge to re-arm.
 	const bool bUnarmedDanger = !bHasWeapon && !bWeaponWithinReach && bEnemyClose;
 
 	// At critical HP, flee only if it helps: can run (stamina), can heal mid-flee (medkit), or unarmed.
@@ -160,17 +160,15 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		if (Stam->GetMaxStamina() > 0.f) StamPctNow = Stam->GetCurrentStamina() / Stam->GetMaxStamina();
 	const bool bCriticalFlee = (HealthPct < 0.25f) && (!bHasWeapon || bHasMedkit || StamPctNow > 0.15f);
 
-	// Don't flee a fight we've committed to (armed + can't shake the enemy) — stand and shoot.
+	// Don't flee a fight we've committed to.
 	const bool bWantFlee = bEnemyVisible && (bCriticalFlee || bCornered || bUnarmedDanger) && !bFightCommitLatched;
 
-	// Hysteresis: latch fleeing ON when we want to flee, and only release it once the enemy is
-	// clearly far (or gone). This stops the flee state from flickering when a chaser hovers around
-	// the trigger distance, which was making the BT abort/re-enter Flee every frame.
+	// Latch fleeing on until the enemy is clearly far, to stop flicker.
 	if (!bEnemyVisible)            bFleeLatched = false;
 	else if (bWantFlee)           bFleeLatched = true;
 	else if (EnemyDist > 1200.f)  bFleeLatched = false;
 	if (bFightCommitLatched)      bFleeLatched = false;
-	if (bWeaponWithinReach)       bFleeLatched = false; // unarmed + weapon in reach → re-arm, don't flee
+	if (bWeaponWithinReach)       bFleeLatched = false; // re-arm instead of fleeing
 
 	// Purge zone overrides everything: flee out of the blast radius regardless of enemies.
 	const bool bInPurgeZone = (Survivor->GetActivePurgeZoneDanger() != nullptr);
@@ -188,7 +186,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 	BB->SetValueAsBool(FName("bNeedsFood"), StaminaPct < 0.4f && bHasFood && (!bEnemyVisible || !bHasWeapon));
 	BB->SetValueAsBool(FName("bShouldFlee"), bShouldFlee);
 
-	// --- Validate TargetEnemy (clear if dead, destroyed, or too far) ---
+	// Validate TargetEnemy (clear if dead, destroyed, or too far)
 	AActor* TargetEnemy = Cast<AActor>(BB->GetValueAsObject(FName("TargetEnemy")));
 	if (TargetEnemy)
 	{
@@ -200,7 +198,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		{
 			// If enemy is beyond lose-sight range + buffer, clear it
 			const float DistToEnemy = FVector::Dist(Survivor->GetActorLocation(), TargetEnemy->GetActorLocation());
-			if (DistToEnemy > 2000.f) // well beyond lose-sight radius of 1500
+			if (DistToEnemy > 2000.f)
 			{
 				BB->ClearValue(FName("TargetEnemy"));
 				UE_LOG(LogTemp, Log, TEXT("Service: Enemy too far (%.0f), clearing target"), DistToEnemy);
@@ -208,7 +206,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// No target but we perceive a zombie → acquire the nearest (OnPerceptionUpdated only fires on changes).
+	// No target but a zombie is perceived: acquire the nearest.
 	if (!BB->GetValueAsObject(FName("TargetEnemy")) && Survivor->GetPerceptionComponent())
 	{
 		TArray<AActor*> PerceivedActors;
@@ -228,7 +226,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// --- Inventory: keep room for a second weapon by dropping a spare consumable when the bag is full ---
+	// Keep room for a second weapon by dropping a spare consumable when full.
 	if (Inventory)
 	{
 		const TArray<ABaseItem*>& InvItems = Inventory->GetInventory();
@@ -261,10 +259,10 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			}
 		}
 
-		// Full bag with <2 weapons and 3+ consumables → drop the worst consumable to leave room for a weapon.
+		// Full bag with <2 weapons and 3+ consumables: drop the worst consumable.
 		if (bInvFull && WeaponCount < 2 && (MedkitCount + FoodCount) >= 3 && WorstConsumableSlot >= 0)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("STATUS: Only %d weapon(s) — dropping %s(%d) from slot %d to keep room for a weapon"),
+			UE_LOG(LogTemp, Warning, TEXT("STATUS: Only %d weapon(s) - dropping %s(%d) from slot %d to keep room for a weapon"),
 				WeaponCount,
 				ItemTypeName(InvItems[WorstConsumableSlot]->GetItemType()),
 				InvItems[WorstConsumableSlot]->GetValue(),
@@ -273,7 +271,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// --- Validate TargetItem (clear if destroyed, picked up, or inventory full) ---
+	// Validate TargetItem
 	AActor* TargetItem = Cast<AActor>(BB->GetValueAsObject(FName("TargetItem")));
 	bool bHasEmptySlot = false;
 	int32 ConsumableCount = 0;
@@ -290,7 +288,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			else if (T == EItemType::Food) ++InvFood;
 		}
 	}
-	// Even with a full bag we can take a weapon (drop a spare consumable) or a needed medkit/food (drop a spare weapon).
+	// Full bag can still take a weapon or a needed consumable by dropping a spare.
 	const bool bCanDropForWeapon = (ConsumableCount >= 2);
 	const bool bCanDropWeaponForConsumable = (InvWeapons >= 3);
 	auto IsNeededConsumable = [&](EItemType T) -> bool
@@ -318,7 +316,7 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// No target item but we have room → re-scan perceived items (OnPerceptionUpdated only fires on changes).
+	// No target item but we have room: re-scan perceived items.
 	if (!TargetItem && (bHasEmptySlot || bCanDropForWeapon || bCanDropWeaponForConsumable) && Survivor->GetPerceptionComponent())
 	{
 		TArray<AActor*> PerceivedActors;
@@ -331,8 +329,8 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 			ABaseItem* Item = Cast<ABaseItem>(Actor);
 			if (!Item || !IsValid(Item)) continue;
 			if (Item->GetItemType() == EItemType::Garbage) continue;
-			// With a full bag, only go for a weapon (drop a spare consumable) or a medkit/food we lack
-			// (drop a spare weapon). Other consumables we already have aren't worth the trip.
+
+			// Full bag: only a weapon or a consumable we lack is worth the trip.
 			if (!bHasEmptySlot && !IsWeapon(Item->GetItemType()) && !IsNeededConsumable(Item->GetItemType())) continue;
 
 			const float Dist = FVector::Dist(Survivor->GetActorLocation(), Item->GetActorLocation());
@@ -360,10 +358,10 @@ void UBTService_UpdateBlackboard::TickNode(UBehaviorTreeComponent& OwnerComp, ui
 		}
 	}
 
-	// --- Self location ---
+	// Self location
 	BB->SetValueAsVector(FName("SelfLocation"), Survivor->GetActorLocation());
 
-	// --- Debug status log (every ~2 seconds, not every tick) ---
+	// Debug status log 
 	DebugLogTimer += Interval;
 	if (DebugLogTimer >= 2.0f)
 	{

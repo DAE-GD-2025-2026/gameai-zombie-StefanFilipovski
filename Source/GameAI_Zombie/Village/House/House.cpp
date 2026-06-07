@@ -90,8 +90,7 @@ UAISense_Sight::EVisibilityResult AHouse::CanBeSeenFrom(
 
 EHouseType AHouse::GetHouseType() const
 {
-	// Blueprint instances report a class name like "BP_HouseA_C" — match the variant suffix. Check the
-	// A/B/C variants BEFORE the generic "House" (they also contain "House").
+	// Match the variant suffix; check A/B/C before the generic House.
 	const FString N = GetClass() ? GetClass()->GetName() : FString();
 	if (N.Contains(TEXT("HouseA"))) return EHouseType::SquareTwoDoor;
 	if (N.Contains(TEXT("HouseB"))) return EHouseType::Rectangle;
@@ -123,8 +122,7 @@ void AHouse::GetCornerOpenings(FVector OutCorners[4], float Inset) const
 
 	if (GetHouseType() == EHouseType::OpenCorners)
 	{
-		// House_C: the corners are walled and each SIDE has an opening. Aim at the four wall-midpoints
-		// (pulled inward) so we pass through a side doorway rather than into a blocked corner.
+		// House_C: openings are on the sides; aim at the wall midpoints.
 		OutCorners[0] = B.Origin + FVector(+SX, 0.f, 0.f);
 		OutCorners[1] = B.Origin + FVector(-SX, 0.f, 0.f);
 		OutCorners[2] = B.Origin + FVector(0.f, +SY, 0.f);

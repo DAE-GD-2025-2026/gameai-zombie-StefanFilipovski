@@ -11,10 +11,10 @@
 
 namespace
 {
-	// True if there's grabbable loot nearby and the enemy isn't close — yield to Pickup before engaging.
+	// True if there's grabbable loot nearby and the enemy isn't close - yield to Pickup before engaging.
 	bool ShouldFinishLootingFirst(ASurvivorPawn* Survivor, float EnemyDist)
 	{
-		if (!Survivor || EnemyDist <= 700.f) return false; // enemy close → fight, don't loot
+		if (!Survivor || EnemyDist <= 700.f) return false; // enemy close fight, don't loot
 
 		UInventoryComponent* Inv = Survivor->GetInventoryComponent();
 		UAIPerceptionComponent* Perc = Survivor->GetPerceptionComponent();
@@ -40,7 +40,7 @@ namespace
 			if (!It || !IsValid(It) || It->GetItemType() == EItemType::Garbage) continue;
 			if (FVector::Dist(MyLoc, It->GetActorLocation()) > 700.f) continue;
 
-			// Only defer for loot we can actually carry (matches Pickup's rules).
+			// Only defer for loot we can actually carry.
 			const EItemType IT = It->GetItemType();
 			const bool bWeapon = (IT == EItemType::Pistol || IT == EItemType::Shotgun);
 			const bool bNeeded = (IT == EItemType::Medkit && Medkits == 0) || (IT == EItemType::Food && Food == 0);
@@ -125,7 +125,7 @@ void UBTTask_FightEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 
 	const float DistToEnemy = FVector::Dist(Survivor->GetActorLocation(), Enemy->GetActorLocation());
 
-	// Loot still to grab nearby and the enemy isn't on top of us → finish looting first (yield to Pickup).
+	// Loot still to grab nearby and the enemy isn't on top of us -> finish looting first (yield to Pickup).
 	if (ShouldFinishLootingFirst(Survivor, DistToEnemy))
 	{
 		AIC->StopMovement();
@@ -169,7 +169,7 @@ void UBTTask_FightEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 				}
 			}
 
-			// No usable weapon left — yield so the BT can re-arm or flee.
+			// No usable weapon left - yield so the BT can re-arm or flee.
 			if (!bFired)
 			{
 				FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
@@ -179,7 +179,7 @@ void UBTTask_FightEnemy::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 	}
 	else
 	{
-		// Keep chasing.
+		// Keep chasing
 		AIC->MoveToActor(Enemy, AttackRange - 50.f);
 	}
 }

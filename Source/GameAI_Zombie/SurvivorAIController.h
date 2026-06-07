@@ -17,11 +17,11 @@ public:
 protected:
 	virtual void BeginPlay() override;
 
-	// The Behavior Tree to run — assign in BP_SurvivorAIController defaults
+	
 	UPROPERTY(EditDefaultsOnly, Category = "AI")
 	UBehaviorTree* BehaviorTreeAsset;
 
 public:
-	// Helper to get the blackboard quickly from anywhere
+	
 	UBlackboardComponent* GetBB() const;
 };

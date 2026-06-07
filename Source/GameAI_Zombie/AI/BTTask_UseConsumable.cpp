@@ -65,6 +65,6 @@ EBTNodeResult::Type UBTTask_UseConsumable::ExecuteTask(UBehaviorTreeComponent& O
 		}
 	}
 
-	// Nothing to use or no need
+	// Nothing to use
 	return EBTNodeResult::Failed;
 }

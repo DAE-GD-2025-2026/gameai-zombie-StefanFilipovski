@@ -17,9 +17,7 @@ UBTTask_Explore::UBTTask_Explore()
 	bNotifyTick = true;
 }
 
-// ---------------------------------------------------------------------------------------------------
 // Small helpers
-// ---------------------------------------------------------------------------------------------------
 
 bool UBTTask_Explore::GetThreatLocation(UBehaviorTreeComponent& OwnerComp, FVector& OutLoc) const
 {
@@ -50,8 +48,7 @@ bool UBTTask_Explore::IsInsideHouse(const FVector& Loc, AHouse* House) const
 {
 	if (!House) return false;
 	const FHouseBounds B = House->GetBounds();
-	// Generous: count being anywhere within (or just at the edge of) the footprint as "in the doorway /
-	// inside", so we loot from the entrance instead of stalling trying to reach the exact centre.
+	// Count anywhere in the footprint as inside, so we loot from the entrance.
 	return FMath::Abs(Loc.X - B.Origin.X) <= B.Extent.X + 60.f
 		&& FMath::Abs(Loc.Y - B.Origin.Y) <= B.Extent.Y + 60.f;
 }
@@ -122,7 +119,7 @@ void UBTTask_Explore::SetActiveHouse(ASurvivorPawn* Survivor, AHouse* House, con
 	ActiveHouse = House;
 	const FHouseBounds B = House->GetBounds();
 	const FVector Center(B.Origin.X, B.Origin.Y, Origin.Z);
-	// Aim a bit past the centre, deeper along the approach direction (helps long rectangle houses). Clamped.
+	// Aim a bit past the centre, clamped inside the footprint.
 	const FVector Dir = FVector(Center.X - Origin.X, Center.Y - Origin.Y, 0.f).GetSafeNormal2D();
 	FVector Deep = Center + Dir * 300.f;
 	Deep.X = FMath::Clamp(Deep.X, B.Origin.X - B.Extent.X * 0.7f, B.Origin.X + B.Extent.X * 0.7f);
@@ -169,10 +166,7 @@ void UBTTask_Explore::ResetState()
 	ScanTargetYaw = 0.f;
 }
 
-// ---------------------------------------------------------------------------------------------------
-// BT entry points — both just run the persistent planner. We never finish the task ourselves; the BT
-// preempts us (Flee/Fight/Pickup) via decorators when needed and resumes us afterwards.
-// ---------------------------------------------------------------------------------------------------
+// BT entry points: run the persistent planner. The BT preempts and resumes us.
 
 EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* /*NodeMemory*/)
 {
@@ -181,7 +175,6 @@ EBTNodeResult::Type UBTTask_Explore::ExecuteTask(UBehaviorTreeComponent& OwnerCo
 	ASurvivorPawn* Survivor = Cast<ASurvivorPawn>(AIC->GetPawn());
 	if (!Survivor) return EBTNodeResult::Failed;
 
-	// New PIE run? (Task objects can persist between runs.) Wipe stale plan/cooldowns.
 	if (LastWorld.Get() != GetWorld())
 	{
 		ResetState();
@@ -202,9 +195,7 @@ void UBTTask_Explore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* /*NodeM
 	RunPlan(OwnerComp, AIC, Survivor);
 }
 
-// ---------------------------------------------------------------------------------------------------
 // The planner
-// ---------------------------------------------------------------------------------------------------
 
 void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* AIC, ASurvivorPawn* Survivor)
 {
@@ -215,10 +206,9 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 	const float Now = World->GetTimeSeconds();
 	const FVector Origin = Survivor->GetActorLocation();
 
-	// Look-around scan: step the facing through sectors and dwell on each so the throttled sight sense can
-	// sample that direction (a fast continuous spin aliases and misses things). Movement is unaffected.
+	// Look-around scan: step the facing in sectors and dwell so the sight sense can sample each.
 	{
-		const float SectorStep = 72.f;   // 5 sectors cover 360°
+		const float SectorStep = 72.f;   // 5 sectors cover a full turn
 		const float HoldTime    = 0.5f;  // dwell per sector
 		const float TurnRate    = 540.f;
 		FRotator R = Survivor->GetActorRotation();
@@ -242,29 +232,28 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 	FVector ThreatLoc;
 	const bool bThreat = GetThreatLocation(OwnerComp, ThreatLoc);
 
-	// Sprint when an enemy is near so goal-seeking stays evasive.
+	// Sprint when an enemy is near so goal seeking stays evasive.
 	if (bThreat && FVector::Dist2D(Origin, ThreatLoc) < 900.f) Survivor->StartRunning();
 	else Survivor->StopRunning();
 
-	// 1) Looting: walk to the room centre before looting (walls block line-of-sight to loot from the door).
+	// 1) Walk to the room centre before looting (walls block line-of-sight from the door).
 	if (AHouse* Active = Cast<AHouse>(ActiveHouse.Get()))
 	{
 		const float DistCenter = FVector::Dist2D(Origin, InteriorTarget);
 		const bool bInFootprint = IsInsideHouse(Origin, Active);
 		if (bInFootprint) InsideTimer += Dt;
 
-		// Loot once we're at the room centre, OR we've been inside a while but can't reach the exact
-		// centre (blocked) — the latter is a safety valve so we never stall inside.
+		// Loot at the centre, or after being stuck inside a while (safety valve).
 		if (DistCenter < 250.f || (bInFootprint && InsideTimer > 5.f))
 		{
 			if (!bStoppedInside) { AIC->StopMovement(); bStoppedInside = true; }
 
-			// Sweep our view around the room so we perceive every item, not just those in the facing cone.
+			// Sweep our view so we perceive every item in the room.
 			FRotator R = Survivor->GetActorRotation();
 			R.Yaw += 220.f * Dt;
 			Survivor->SetActorRotation(R);
 
-			// Keep clearing while anything is grabbable; count as looted only once a sweep finds nothing.
+			// Keep clearing while items remain; looted once a sweep finds nothing.
 			UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 			const bool bItemToGrab = BB && BB->GetValueAsObject(FName("TargetItem")) != nullptr;
 			if (bItemToGrab) { DwellTimer = 0.f; bSawItemThisVisit = true; }
@@ -275,11 +264,11 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 				if (bSawItemThisVisit)
 				{
 					CooldownHouse(Active);
-					UE_LOG(LogTemp, Log, TEXT("Explore: looted a %s house — moving on"), *Active->GetHouseTypeString());
+					UE_LOG(LogTemp, Log, TEXT("Explore: looted a %s house - moving on"), *Active->GetHouseTypeString());
 				}
 				else
 				{
-					// Picked-clean only if we had room to take something; a full bag gets the short cooldown.
+					// Picked-clean only if we had room; a full bag gets the short cooldown.
 					bool bHadRoom = false;
 					if (UInventoryComponent* Inv = Survivor->GetInventoryComponent())
 						for (ABaseItem* S : Inv->GetInventory()) if (!S) { bHadRoom = true; break; }
@@ -287,12 +276,12 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 					if (bHadRoom)
 					{
 						CooldownHouse(Active, ExhaustedCooldown);
-						UE_LOG(LogTemp, Log, TEXT("Explore: %s house was empty — picked-clean, moving on"), *Active->GetHouseTypeString());
+						UE_LOG(LogTemp, Log, TEXT("Explore: %s house was empty - picked-clean, moving on"), *Active->GetHouseTypeString());
 					}
 					else
 					{
 						CooldownHouse(Active);
-						UE_LOG(LogTemp, Log, TEXT("Explore: bag full at a %s house — will revisit"), *Active->GetHouseTypeString());
+						UE_LOG(LogTemp, Log, TEXT("Explore: bag full at a %s house - will revisit"), *Active->GetHouseTypeString());
 					}
 				}
 				ClearActive();
@@ -300,7 +289,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 			return;
 		}
 
-		// Inside the building but not yet at the centre — head deeper in (don't loot at the door).
+		// Inside but not at the centre: head deeper in.
 		if (bInFootprint)
 		{
 			CurrentGoal = InteriorTarget;
@@ -309,7 +298,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 		}
 	}
 
-	// 2) Re-arm shortcut: weaponless + a remembered weapon spot closer than the nearest house → grab it.
+	// 2) Re-arm: if a known weapon is closer than the nearest house, grab it.
 	bool bHasWeapon = false;
 	if (UInventoryComponent* Inv = Survivor->GetInventoryComponent())
 	{
@@ -333,7 +322,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 		{
 			ClearActive();
 			IssueMove(AIC, BestW, 80.f);
-			if (BestWDist < 150.f) Survivor->ForgetWeaponNear(BestW); // grabbed (Pickup) or stale
+			if (BestWDist < 150.f) Survivor->ForgetWeaponNear(BestW); // grabbed or stale
 			return;
 		}
 	}
@@ -390,7 +379,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 		VentureStartIdle = -1.f;
 		if (Target != ActiveHouse.Get()) SetActiveHouse(Survivor, Target, Origin);
 
-		// Stuck / blocked → try the corner doorways in turn.
+		// Stuck / blocked try the corner doorways in turn.
 		StuckTimer += Dt;
 		const bool bStopped = AIC->GetMoveStatus() != EPathFollowingStatus::Moving;
 		if (StuckTimer >= 3.f || bStopped)
@@ -410,7 +399,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 				else
 				{
 					CooldownHouse(Target);
-					UE_LOG(LogTemp, Log, TEXT("Explore: couldn't get inside — moving on"));
+					UE_LOG(LogTemp, Log, TEXT("Explore: couldn't get inside - moving on"));
 					ClearActive();
 					return;
 				}
@@ -423,7 +412,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 		return;
 	}
 
-	// 4) No house available → avoid threats, or wander/venture to find a new cluster.
+	// 4) No house available so avoid threats, or wander/venture to find a new cluster.
 	USteeringComponent* Steering = Survivor->GetSteeringComponent();
 
 	if (bThreat && Survivor->GetKnownHouseCount() > 0)
@@ -443,7 +432,7 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 	}
 	bAvoiding = false;
 
-	// Idle (everything known is on cooldown / nothing nearby) for a while → venture out to find more.
+	// Idle (everything known is on cooldown / nothing nearby) for a while venture out to find more
 	if (VentureStartIdle < 0.f) VentureStartIdle = Now;
 	if (Now - VentureStartIdle > VentureAfter)
 	{
@@ -455,11 +444,11 @@ void UBTTask_Explore::RunPlan(UBehaviorTreeComponent& OwnerComp, AAIController* 
 		if (Steering) Steering->Stop();
 		bLastIssuedValid = false;
 		IssueMove(AIC, VentureTarget, 150.f);
-		UE_LOG(LogTemp, Log, TEXT("Explore: local cluster exhausted — venturing out to find a new one"));
+		UE_LOG(LogTemp, Log, TEXT("Explore: local cluster exhausted - venturing out to find a new one"));
 		return;
 	}
 
-	// Otherwise wander near the cluster (steering), leashed to the home anchor.
+	// Otherwise wander near the cluster leashed to the home anchor.
 	const FVector Home = GetHomeAnchor(Survivor);
 	if (FVector::Dist2D(Origin, Home) > WanderLeash)
 	{

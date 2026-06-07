@@ -4,7 +4,7 @@
 
 ASurvivorAIController::ASurvivorAIController()
 {
-	// No need to tick the controller itself — the BT handles everything
+	 //the BT handles 
 	PrimaryActorTick.bCanEverTick = false;
 }
 
@@ -12,7 +12,7 @@ void ASurvivorAIController::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Register with the component manager (required by the exam framework)
+	// Register with the component manager
 	if (UGameFrameworkComponentManager* ComponentManager =
 		GetGameInstance()->GetSubsystem<UGameFrameworkComponentManager>())
 	{

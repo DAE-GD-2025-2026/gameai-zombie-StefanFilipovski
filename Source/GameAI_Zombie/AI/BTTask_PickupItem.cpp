@@ -14,7 +14,7 @@ namespace
 	bool IsWeaponType(EItemType Type) { return Type == EItemType::Pistol || Type == EItemType::Shotgun; }
 	bool IsConsumableType(EItemType Type) { return Type == EItemType::Food || Type == EItemType::Medkit; }
 
-	/** Count weapons currently in inventory */
+	// Count weapons currently in inventory
 	int32 CountWeapons(UInventoryComponent* Inv)
 	{
 		int32 Count = 0;
@@ -25,7 +25,7 @@ namespace
 		return Count;
 	}
 
-	/** True if we currently hold ZERO of this consumable type (so it's worth making room for). */
+	// true if we currently hold ZERO of this consumable type (so it's worth making room for).
 	bool IsConsumableNeeded(UInventoryComponent* Inv, EItemType Type)
 	{
 		if (Type != EItemType::Medkit && Type != EItemType::Food) return false;
@@ -34,7 +34,7 @@ namespace
 		return true;
 	}
 
-	/** Slot of the lowest-ammo weapon we can spare (keeps at least KeepAtLeast weapons), or -1. */
+	// Slot of the lowest-ammo weapon we can spare (keeps at least KeepAtLeast weapons), or -1
 	int32 FindWorstWeaponSlot(UInventoryComponent* Inv, int32 KeepAtLeast)
 	{
 		const TArray<ABaseItem*>& Items = Inv->GetInventory();
@@ -48,8 +48,7 @@ namespace
 		return (WeaponCount > KeepAtLeast) ? WorstSlot : -1;
 	}
 
-	/** Find the slot index of the least valuable consumable, or -1 if none.
-	 *  Will not drop if we'd go below MinConsumables total consumables. */
+	// Slot of the least valuable consumable, or -1 (won't go below MinConsumables)
 	int32 FindWorstConsumableSlot(UInventoryComponent* Inv, int32 MinConsumables = 0)
 	{
 		int32 ConsumableCount = 0;
@@ -67,7 +66,7 @@ namespace
 		// Don't drop if we'd go below minimum
 		if (ConsumableCount <= MinConsumables) return -1;
 
-		// Second pass: find worst
+		// find worst
 		for (int32 i = 0; i < Items.Num(); ++i)
 		{
 			if (!Items[i]) continue;
@@ -108,7 +107,7 @@ EBTNodeResult::Type UBTTask_PickupItem::ExecuteTask(UBehaviorTreeComponent& Owne
 	UInventoryComponent* Inventory = Survivor->GetInventoryComponent();
 	if (!Inventory) return EBTNodeResult::Failed;
 
-	// Check for empty slot — if full, drop a consumable for a weapon
+	// Check for empty slot - if full, drop a consumable for a weapon
 	bool bHasEmptySlot = false;
 	const TArray<ABaseItem*>& Items = Inventory->GetInventory();
 	for (int32 i = 0; i < Items.Num(); ++i)
@@ -118,7 +117,7 @@ EBTNodeResult::Type UBTTask_PickupItem::ExecuteTask(UBehaviorTreeComponent& Owne
 
 	if (!bHasEmptySlot)
 	{
-		// Full: drop a spare consumable for a weapon, or a spare weapon for a medkit/food we lack.
+		// drop a spare consumable for a weapon, or a spare weapon for a medkit/food we lack.
 		const EItemType TT = TargetItem->GetItemType();
 		int32 DropSlot = -1;
 		if (IsWeaponType(TT))
@@ -171,7 +170,7 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 		return;
 	}
 
-	// Timeout — give up on this item
+	// Timeout - give up on this item
 	if (Memory->TimeElapsed >= TimeoutSeconds)
 	{
 		if (Survivor->GetSteeringComponent()) Survivor->GetSteeringComponent()->Stop();
@@ -192,7 +191,7 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 
 	USteeringComponent* Steering = Survivor->GetSteeringComponent();
 
-	// Not in range: far → navmesh around walls; close → precise steering (navmesh can stall short of the item).
+	// Far: navmesh around walls. Close: precise steering.
 	if (Dist > PickupRange + 20.f)
 	{
 		if (Dist > 250.f)
@@ -214,7 +213,7 @@ void UBTTask_PickupItem::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 		return;
 	}
 
-	// In pickup range — grab.
+	// In pickup range - grab.
 	{
 		AIC->StopMovement();
 		if (Steering) Steering->Stop();

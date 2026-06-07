@@ -12,9 +12,9 @@ struct FBTFleeMemory
 	bool bInitialized = false;
 
 	// When wedged, commit to an open escape for a short while instead of snapping back to the refuge.
-	float CommitUntil = 0.f;                         // honour CommitTarget while TimeElapsed < this
+	float CommitUntil = 0.f;                         
 	FVector CommitTarget = FVector::ZeroVector;
-	int32 StuckCount = 0;                            // consecutive stuck detections (escalates the angle)
+	int32 StuckCount = 0;                           
 };
 
 /**

@@ -18,8 +18,7 @@ struct GAMEAI_ZOMBIE_API FHouseBounds
 	FVector Extent;
 };
 
-/** The four house layouts. Every type's opening(s) sit at the building's CORNERS, which is what lets
- *  the survivor reason about how to get in. */
+/** The four house layouts; openings sit at the corners. */
 UENUM(BlueprintType)
 enum class EHouseType : uint8
 {
@@ -53,8 +52,7 @@ protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
 
-	// Lets the survivor's AIPerception (sight) discover this house, so exploration is
-	// driven by perception rather than a global world query.
+	// Lets the survivor's sight perception discover this house.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Perception")
 	UAIPerceptionStimuliSourceComponent* StimuliSource;
 
@@ -70,8 +68,6 @@ public:
 	/** Human-readable type, for logging/knowledge. */
 	FString GetHouseTypeString() const;
 
-	/** World positions of the building's four corners (where the openings are), each pulled INWARD
-	 *  toward the centre by Inset so the point sits just inside the doorway gap — i.e. good navmesh
-	 *  targets for "go through the opening". Order is deterministic. */
+	/** World positions of the four corner openings, pulled inward for navmesh targets. */
 	void GetCornerOpenings(FVector OutCorners[4], float Inset = 90.f) const;
 };

@@ -24,8 +24,7 @@ void ABaseZombie::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Periodically emit a (silent) noise event so the survivor can HEAR us nearby, even when we're
-	// outside its sight cone (e.g. chasing from behind). Throttled to keep it cheap with many zombies.
+	
 	NoiseEmitTimer += DeltaTime;
 	if (NoiseEmitTimer >= NoiseInterval)
 	{

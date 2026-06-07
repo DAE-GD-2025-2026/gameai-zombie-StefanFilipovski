@@ -1,4 +1,4 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+
 
 
 #include "HealthComponent.h"
@@ -26,7 +26,7 @@ void UHealthComponent::TakeDamage(int Amount)
 	}
 	else if (Amount > 0)
 	{
-		// Took a hit and still alive — notify listeners.
+		// Took a hit and still alive - notify listeners.
 		OnDamaged.Broadcast();
 	}
 }

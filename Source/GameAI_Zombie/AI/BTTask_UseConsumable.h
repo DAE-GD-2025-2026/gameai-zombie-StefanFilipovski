@@ -8,7 +8,7 @@
  * Uses the best consumable from inventory:
  *  - Medkit if health < 70%
  *  - Food if stamina < 40%
- * Instant task — fires and finishes immediately.
+ * Instant task - fires and finishes immediately.
  */
 UCLASS()
 class GAMEAI_ZOMBIE_API UBTTask_UseConsumable : public UBTTaskNode
